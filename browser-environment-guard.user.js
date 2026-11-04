@@ -24,6 +24,7 @@
 
   const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const KEY = 'preferredIanaTimezone';
+  const POSITION_KEY = 'floatingButtonPositionV1';
   const SYSTEM = 'system';
   const NativeDate = page.Date;
   const NativeDTF = page.Intl.DateTimeFormat;
@@ -365,17 +366,20 @@
     if (page.top !== page || !document.body || document.getElementById('ca-tz-host')) return;
     const host = document.createElement('div');
     host.id = 'ca-tz-host';
-    host.style.cssText = 'position:fixed;bottom:14px;left:14px;z-index:2147483647;pointer-events:none';
+    host.style.cssText = 'position:fixed;top:12px;left:12px;z-index:2147483647;pointer-events:none';
     const shadow = host.attachShadow({ mode: 'closed' });
     shadow.innerHTML = `
       <style>
         :host { color-scheme:light dark; }
         * { box-sizing:border-box; }
         .fab { appearance:none;background:#242b39;color:#fff;border:1px solid #65738a;
-          border-radius:12px;padding:9px 12px;font:600 13px system-ui,sans-serif;cursor:pointer;
+          border-radius:12px;padding:9px 12px;font:600 13px system-ui,sans-serif;cursor:grab;
+          touch-action:none;user-select:none;-webkit-user-select:none;
           box-shadow:0 4px 14px #0004; }
-        .panel { width:min(370px,calc(100vw - 28px));max-height:min(74vh,620px);overflow:auto;
-          margin-bottom:9px;padding:16px;border:1px solid #d6dae4;border-radius:15px;
+        .fab:active { cursor:grabbing; }
+        .panel { position:fixed;width:min(370px,calc(100vw - 28px));
+          max-height:min(74vh,620px);overflow:auto;overscroll-behavior:contain;
+          margin:0;padding:16px;border:1px solid #d6dae4;border-radius:15px;
           background:#fff;color:#171f2e;box-shadow:0 12px 40px #0005;font:14px system-ui,sans-serif; }
         .header { display:flex;justify-content:space-between;align-items:center;gap:10px; }
         .title { font-size:16px;font-weight:750; }
@@ -436,7 +440,7 @@
         <button id="system" class="action system" type="button">Use system time zone</button>
         <div class="tip">Search the complete list, or type a valid IANA alias not shown in it. Press Enter to save your typed time zone. JavaScript time zone only; it does not change your IP, device settings, or server-side account region.</div>
       </section>
-      <button id="toggle" class="fab" type="button" title="Choose time zone">🕒 TZ</button>
+      <button id="toggle" class="fab" type="button" title="Click to choose time zone; drag to move" aria-label="Time zone switcher (drag to move)">🕒 TZ</button>
     `;
     const $ = id => shadow.getElementById(id);
     const list = $('list');
@@ -444,6 +448,109 @@
     const allZones = getSupportedZones();
     let selected = zone;
     const maxVisible = 120;
+    const toggle = $('toggle');
+    const panel = $('panel');
+    const EDGE = 12;
+
+    // Save relative coordinates so the button stays visible when the viewport changes.
+    function validPosition(value) {
+      return value && typeof value === 'object' &&
+        Number.isFinite(value.x) && Number.isFinite(value.y) &&
+        value.x >= 0 && value.x <= 1 && value.y >= 0 && value.y <= 1;
+    }
+    let savedPosition = GM_getValue(POSITION_KEY, null);
+    let position = validPosition(savedPosition) ? { x: savedPosition.x, y: savedPosition.y } : { x: 0, y: 1 };
+
+    function placementBounds() {
+      const width = document.documentElement.clientWidth || page.innerWidth;
+      const height = page.innerHeight || document.documentElement.clientHeight;
+      return {
+        width,
+        height,
+        maxLeft: Math.max(EDGE, width - EDGE - toggle.offsetWidth),
+        maxTop: Math.max(EDGE, height - EDGE - toggle.offsetHeight),
+      };
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(value, max));
+    }
+
+    function applyPosition() {
+      const bounds = placementBounds();
+      host.style.left = `${EDGE + position.x * (bounds.maxLeft - EDGE)}px`;
+      host.style.top = `${EDGE + position.y * (bounds.maxTop - EDGE)}px`;
+      layoutPanel();
+    }
+
+    // Open the panel above or below the dragged button, staying within the viewport.
+    function layoutPanel() {
+      if (panel.hidden) return;
+      const { width, height } = placementBounds();
+      const buttonRect = toggle.getBoundingClientRect();
+      const above = Math.max(0, buttonRect.top - EDGE - 8);
+      const below = Math.max(0, height - buttonRect.bottom - EDGE - 8);
+      const showBelow = below >= above;
+      const available = showBelow ? below : above;
+      panel.style.maxHeight = `${Math.max(1, Math.min(620, Math.floor(height * 0.74), Math.floor(available)))}px`;
+      panel.style.left = `${clamp(buttonRect.left, EDGE, Math.max(EDGE, width - EDGE - panel.offsetWidth))}px`;
+      const actualHeight = panel.getBoundingClientRect().height;
+      panel.style.top = `${clamp(showBelow ? buttonRect.bottom + 8 : buttonRect.top - 8 - actualHeight,
+        EDGE, Math.max(EDGE, height - EDGE - actualHeight))}px`;
+    }
+
+    let drag = null;
+    let lastDragEnded = -Infinity;
+    toggle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || !event.isPrimary) return;
+      drag = {
+        id: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        left: parseFloat(host.style.left),
+        top: parseFloat(host.style.top),
+        moved: false,
+      };
+      toggle.setPointerCapture(event.pointerId);
+    });
+    toggle.addEventListener('pointermove', event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (!drag.moved && Math.hypot(dx, dy) < 5) return;
+      drag.moved = true;
+      event.preventDefault();
+      const bounds = placementBounds();
+      const left = clamp(drag.left + dx, EDGE, bounds.maxLeft);
+      const top = clamp(drag.top + dy, EDGE, bounds.maxTop);
+      host.style.left = `${left}px`;
+      host.style.top = `${top}px`;
+      position = {
+        x: bounds.maxLeft === EDGE ? 0 : (left - EDGE) / (bounds.maxLeft - EDGE),
+        y: bounds.maxTop === EDGE ? 0 : (top - EDGE) / (bounds.maxTop - EDGE),
+      };
+      layoutPanel();
+    });
+    function finishDrag(event) {
+      if (!drag || event.pointerId !== drag.id) return;
+      if (drag.moved) {
+        lastDragEnded = performance.now();
+        GM_setValue(POSITION_KEY, { x: position.x, y: position.y });
+      }
+      if (toggle.hasPointerCapture(event.pointerId)) toggle.releasePointerCapture(event.pointerId);
+      drag = null;
+    }
+    toggle.addEventListener('pointerup', finishDrag);
+    toggle.addEventListener('pointercancel', finishDrag);
+    page.addEventListener('resize', applyPosition, { passive: true });
+
+    if (typeof GM_addValueChangeListener === 'function') {
+      GM_addValueChangeListener(POSITION_KEY, (_name, _old, value, remote) => {
+        if (!remote || !validPosition(value) || drag) return;
+        position = { x: value.x, y: value.y };
+        applyPosition();
+      });
+    }
 
     const currentLabel = x => x === SYSTEM ? `System (${systemZone})` : x;
     function showStatus() {
@@ -489,12 +596,15 @@
       showStatus();
       error('');
       renderResults();
-      $('panel').hidden = false;
+      panel.hidden = false;
+      layoutPanel();
       search.focus();
     };
-    $('toggle').addEventListener('click', () => {
-      if ($('panel').hidden) openPicker();
-      else $('panel').hidden = true;
+    toggle.addEventListener('click', () => {
+      // Dragging must never accidentally open or close the panel.
+      if (performance.now() - lastDragEnded < 400) return;
+      if (panel.hidden) openPicker();
+      else panel.hidden = true;
     });
     $('closeX').addEventListener('click', () => { $('panel').hidden = true; });
     $('cancel').addEventListener('click', () => { $('panel').hidden = true; });
@@ -507,6 +617,7 @@
     });
     host.style.pointerEvents = 'auto';
     document.body.appendChild(host);
+    applyPosition();
   }
 
   if (page.top === page) {
