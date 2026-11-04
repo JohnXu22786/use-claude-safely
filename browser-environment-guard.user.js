@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude / Anthropic - Environment Manager
 // @namespace    https://userscripts.local/claude-anthropic-timezone
-// @description  Environment settings for Claude and webmail; cached IANA data and real in-page header verification.
+// @description  Claude and webmail environment controls with focused IP/timezone/region and language-tag consistency alerts.
 // @match        https://claude.ai/*
 // @match        https://*.claude.ai/*
 // @match        https://claude.com/*
@@ -900,7 +900,7 @@ return headerResult={status:'unavailable'};
 })().finally(()=>headerRunning=null);
 return headerRunning;
 }
-const consistencyState = { state:'checking', details:'Checking browser language, Intl locale, region, timezone, UTC offset, HTTP IP and WebRTC...' };
+const consistencyState = { state:'checking', details:'Checking IP, timezone, region and -CN language tags…' };
 const consistencyListeners = new Set();
 function updateConsistency(state, details) {
 consistencyState.state = state;
@@ -1024,105 +1024,55 @@ timeZone, offset,
 selectedRegion:applied.regionEnabled ? applied.region : null,
 };
 }
-function compareEnvironment(geo, rtc, headers) {
+function compareEnvironment(geo, _rtc, headers) {
 const v = getEnvironmentSnapshot();
 const issues = [];
-const add = (a,b,description) => {
-if (a && b && a !== b) issues.push(`${description}: ${a} vs ${b}`);
-};
-const ipCountry = geo?.region || null;
-if (geo?.disagreement) issues.push('IP geolocation providers disagree');
-if (rtc.ipDisagreement) issues.push('HTTP IP providers disagree');
-if (headers?.status === 'observed' && headers.acceptLanguage) {
-const first = headers.acceptLanguage.split(',')[0].split(';')[0].trim();
-if (first && validLanguage(first) && v.primary && first.toLowerCase() !== v.primary.toLowerCase()) {
-issues.push(`HTTP Accept-Language ${first} vs JavaScript ${v.primary}`);
+const add = text => { if (!issues.includes(text)) issues.push(text); };
+const ip = geo?.disagreement ? null : geo?.region || null;
+const region = v.selectedRegion; // Only an explicitly enabled Region is a geographic choice.
+const zone = v.timeZone;
+const countries = countriesForZone(zone);
+const mapped = countries.length > 0;
+const geoZone = geo?.timezone;
+let zoneChecked = false;
+
+if (ip && region && region !== ip) add(`Region ${region} / IP ${ip}`);
+if (zone) {
+if (mapped) {
+zoneChecked = Boolean(ip);
+if (ip && !countries.includes(ip)) add(`Timezone / IP ${ip}`);
+if (region && !countries.includes(region)) add(`Timezone / Region ${region}`);
+} else if (geoZone && ip) {
+// A timezone's current offset can be compared, but equal offsets do not prove
+// that the timezone belongs to the IP country.
+const a = currentOffsetForZone(zone), b = currentOffsetForZone(geoZone);
+if (a !== null && b !== null && a !== b) {
+zoneChecked = true;
+add('Timezone / IP offset');
 }
 }
-if (headers?.status === 'observed' && headers.userAgent &&
-headers.userAgent !== page.navigator.userAgent) {
-issues.push('HTTP User-Agent differs from navigator.userAgent');
+const expected = currentOffsetForZone(zone);
+if (expected !== null && v.offset !== null && Number.isFinite(v.offset) &&
+Math.abs(expected - v.offset) > 1) add('Timezone / Date offset');
+if (applied.timezone !== SYSTEM && validZone(applied.timezone) !== zone)
+add('Saved / exposed timezone');
 }
-const zoneRegions = countriesForZone(v.timeZone);
-const zoneKnown = zoneRegions.length > 0;
-add(v.selectedRegion, ipCountry, 'Selected region vs IP country');
-add(v.languageRegion, ipCountry, 'Primary browser language region vs IP country');
-add(v.localeRegion, ipCountry, 'Intl date locale region vs IP country');
-add(v.numberRegion, ipCountry, 'Intl number locale region vs IP country');
-add(v.selectedRegion, v.languageRegion, 'Selected region vs primary language region');
-add(v.selectedRegion, v.localeRegion, 'Selected region vs Intl locale region');
-add(v.selectedRegion, v.numberRegion, 'Selected region vs number locale region');
-add(v.languageRegion, v.localeRegion, 'Primary language region vs Intl locale region');
-add(v.localeRegion, v.numberRegion, 'Date vs number locale region');
-if (v.primary && v.languageList.length && v.primary !== v.languageList[0]) {
-issues.push(`navigator.language ${v.primary} differs from navigator.languages[0] ${v.languageList[0]}`);
-}
-if (zoneKnown) {
-for (const [name,country] of [
-['IP country',ipCountry],['selected region',v.selectedRegion],
-['primary language region',v.languageRegion],['Intl locale region',v.localeRegion],
-]) {
-if (country && !zoneRegions.includes(country)) {
-issues.push(`Timezone ${v.timeZone} is not mapped to ${name} ${country}`);
-}
-}
-}
-const expectedOffset = v.timeZone ? currentOffsetForZone(v.timeZone) : null;
-if (expectedOffset !== null && v.offset !== null &&
-Number.isFinite(v.offset) && Math.abs(expectedOffset - v.offset) > 1) {
-issues.push(`Timezone offset mismatch: Date ${v.offset} min vs ${v.timeZone} expected ${expectedOffset} min`);
-}
-if (applied.timezone !== SYSTEM && v.timeZone && validZone(applied.timezone) !== v.timeZone) {
-issues.push(`Configured timezone ${applied.timezone} differs from exposed ${v.timeZone}`);
-}
-if (applied.languageEnabled || applied.matchLanguageRegions) {
-const expected = effectiveLanguages(applied);
-if (JSON.stringify(v.languageList) !== JSON.stringify(expected) || v.primary !== expected[0]) {
-issues.push('Browser language override is not returning the expected language order');
-}
-}
-if ((applied.localeEnabled || applied.regionEnabled) && v.localeRegion !==
-regionInLanguage(effectiveLocale(applied))) {
-issues.push(`Intl locale override is not exposing the expected region`);
-}
-if (applied.fonts && !verifySync('fonts')) {
-issues.push('Font masking did not pass the supported JavaScript checks');
-}
-if (geo?.ip && rtc.httpIPv4 && !rtc.ipDisagreement && ipv4(geo.ip) && geo.ip !== rtc.httpIPv4) {
-issues.push(`HTTP IP providers disagree: ipapi.co ${geo.ip} vs api.ipify.org ${rtc.httpIPv4} (proxy rotation can cause this)`);
-}
-if (rtc.state === 'leak') issues.push(`WebRTC public-IP mismatch: ${rtc.details}`);
-const short = [];
-const labels = [
-['HTTP Accept-Language', 'HTTP language / JS'],
-['HTTP User-Agent', 'HTTP UA / JS'],
-['Selected region vs IP country', 'Region / IP'],
-['Primary browser language region vs IP country', 'Language / IP'],
-['Intl date locale region vs IP country', 'Intl / IP'],
-['Intl number locale region vs IP country', 'Intl / IP'],
-['Timezone offset mismatch', 'UTC offset'],
-['Timezone ', 'Timezone'],
-['WebRTC public-IP mismatch', 'WebRTC / IP'],
-['HTTP IP providers disagree', 'IP services'],
-['IP geolocation providers disagree', 'IP geography'],
-['Browser language override', 'Language override'],
-['Font masking', 'Font protection'],
-['Intl locale override', 'Intl override'],
-['Configured timezone', 'Timezone override'],
-];
-for (const issue of issues) {
-const label = labels.find(([prefix]) => issue.startsWith(prefix));
-let tiny = label ? label[1] : issue.slice(0, 42);
-if (issue.includes(': ') && label && ['Region / IP', 'Language / IP', 'Intl / IP'].includes(tiny)) {
-tiny += ' ' + issue.split(': ').pop().replace(' vs ', '/');
-}
-if (!short.includes(tiny)) short.push(tiny);
-}
-if (issues.length) return {
-state:'warning', details:`${short.length} conflict${short.length === 1 ? '' : 's'}: ${short.slice(0, 3).join(' · ')}${short.length > 3 ? ` · +${short.length - 3}` : ''}`,
-};
-if (!geo?.region) return {state:'unknown', details:'IP location unavailable or disputed · Comparison incomplete'};
-return {state:'ok', details:headers?.status === 'observed' ? 'No observed conflicts · JS + HTTP echo checked (TLS unverified)' : 'No observed JS conflicts · HTTP headers unverified (CSP/CORS)'};
+
+// Language geography is NOT matched to the IP, locale, timezone, or Region.
+// Only non-Chinese language tags ending in -CN are reported.
+const unwantedCN = tags => [...new Set(tags.filter(x =>
+/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*-cn$/i.test(x) && !/^zh(?:-|$)/i.test(x)))];
+const jsCN = unwantedCN([v.primary, ...v.languageList].filter(x => typeof x === 'string'));
+const httpCN = headers?.status === 'observed' && typeof headers.acceptLanguage === 'string'
+? unwantedCN(headers.acceptLanguage.split(',').map(part=>part.split(';')[0].trim())) : [];
+if (jsCN.length) add(`JS -CN: ${jsCN.slice(0,2).join(', ')}${jsCN.length > 2 ? ` +${jsCN.length - 2}` : ''}`);
+if (httpCN.length) add(`HTTP -CN: ${httpCN.slice(0,2).join(', ')}${httpCN.length > 2 ? ` +${httpCN.length - 2}` : ''}`);
+
+if (issues.length) return {state:'warning', details:`${issues.length} issue${issues.length > 1 ? 's' : ''}: ${issues.slice(0,3).join(' · ')}${issues.length > 3 ? ` · +${issues.length - 3}` : ''}`};
+if (geo?.disagreement) return {state:'unknown',details:'IP location sources disagree'};
+if (!ip) return {state:'unknown',details:'IP location unavailable · language tags checked'};
+if (!zoneChecked) return {state:'unknown',details:'Timezone / IP location not verified · no -CN detected'};
+return {state:'ok',details:`IP ${ip} / timezone${region ? ` / region ${region}` : ''} align · no non-zh -CN${headers?.status === 'observed' ? '' : ' (HTTP unverified)'}`};
 }
 let geoResult = null;
 let geoPromise = null;
@@ -1338,7 +1288,7 @@ button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
 <div class="head"><strong>Environment Settings</strong><button id="close" class="tiny" type="button" aria-label="Close">✕</button></div>
 <div class="summary" id="consistencyTop">
 <div class="status" id="consistencyStatus" role="status" aria-live="polite"></div>
-<button class="tiny" id="consistencyRetry" type="button" title="Recheck all signals">↻</button>
+<button class="tiny" id="consistencyRetry" type="button" title="Recheck IP, timezone, region and language tags">↻</button>
 </div>
 <div class="section">
 <div class="label">Timezone</div>
@@ -1388,8 +1338,8 @@ button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
 <button id="rtcRetry" class="tiny" type="button">Check again</button>
 </div>
 <div class="section">
-<div class="setting"><span class="label">Full Environment Consistency</span><input id="ipConsistencyOn" type="checkbox" aria-label="Enable full environment consistency checks"></div>
-<div class="sub">Compares languages, Intl, region, timezone, IP, WebRTC and available font APIs.</div>
+<div class="setting"><span class="label">IP / Timezone / Region Consistency</span><input id="ipConsistencyOn" type="checkbox" aria-label="Enable IP timezone region and language tag checks"></div>
+<div class="sub">Checks IP, timezone, selected region and non-zh -CN language tags (including HTTP if available). Other language regions are unrestricted.</div>
 </div>
 <div class="actionrow" style="margin-top:12px;justify-content:flex-end"><button id="reset" type="button">Reset to defaults</button></div>
 </section>
