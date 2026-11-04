@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Claude / Anthropic - Global Time Zone Switcher
+// @name         Claude / Anthropic - Environment Manager
 // @namespace    https://userscripts.local/claude-anthropic-timezone
-// @description  Override the browser-reported time zone on Claude and Anthropic websites. Search all supported IANA zones, enter a custom ID, and remember one setting across domains.
+// @description  Persistent time zone, browser languages, default Intl locale, Chinese font privacy, and automatic WebRTC leak checks. Draggable control; no unapproved reloads.
 // @match        https://claude.ai/*
 // @match        https://*.claude.ai/*
 // @match        https://claude.com/*
@@ -15,47 +15,248 @@
 // @grant        unsafeWindow
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
 // @grant        GM_addValueChangeListener
+// @connect      api.ipify.org
 // ==/UserScript==
 
 (() => {
   'use strict';
-
   const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-  const KEY = 'preferredIanaTimezone';
+  const CONFIG_KEY = 'environmentManagerPrefsV3';
+  const PENDING_KEY = 'environmentManagerPendingV3';
+  const NOTICE_KEY = 'environmentManagerNoticeV3';
   const POSITION_KEY = 'floatingButtonPositionV1';
+  const LEGACY_TZ_KEY = 'preferredIanaTimezone';
   const SYSTEM = 'system';
   const NativeDate = page.Date;
   const NativeDTF = page.Intl.DateTimeFormat;
-  const systemZone = new NativeDTF('en-US').resolvedOptions().timeZone || 'UTC';
+  const systemZone = new NativeDTF().resolvedOptions().timeZone || 'UTC';
+  const originalLanguages = [...(page.navigator.languages || [page.navigator.language || 'en-US'])];
+  const originalLocale = new NativeDTF().resolvedOptions().locale || 'en-US';
+  const defaultConfig = Object.freeze({
+    timezone: SYSTEM,
+    languageEnabled: false,
+    languages: originalLanguages.length ? originalLanguages : ['en-US'],
+    localeEnabled: false,
+    locale: originalLocale,
+    fonts: true,
+    rtc: true,
+  });
 
-  function validateZone(raw) {
-    if (typeof raw !== 'string') return null;
-    const name = raw.trim();
-    if (name.toLowerCase() === SYSTEM) return SYSTEM;
-    if (!name) return null;
+  function validZone(input) {
+    if (typeof input !== 'string') return null;
+    if (input.toLowerCase().trim() === SYSTEM) return SYSTEM;
+    try { return new NativeDTF('en-US', { timeZone: input.trim() }).resolvedOptions().timeZone; }
+    catch { return null; }
+  }
+  function validLanguage(input) {
+    if (typeof input !== 'string') return null;
     try {
-      return new NativeDTF('en-US', { timeZone: name }).resolvedOptions().timeZone;
-    } catch {
-      return null;
+      const result = page.Intl.getCanonicalLocales(input.trim());
+      return result.length === 1 ? result[0] : null;
+    } catch { return null; }
+  }
+  function validLanguages(list) {
+    if (!Array.isArray(list)) return null;
+    const values = [];
+    for (const item of list) {
+      const v = validLanguage(item);
+      if (!v) return null;
+      if (!values.includes(v)) values.push(v);
+    }
+    return values.length ? values : null;
+  }
+  function sanitize(raw) {
+    const oldTimezone = GM_getValue(LEGACY_TZ_KEY, SYSTEM);
+    const input = raw && typeof raw === 'object' ? raw : {};
+    return {
+      timezone: validZone(input.timezone || oldTimezone) || SYSTEM,
+      languageEnabled: input.languageEnabled === true,
+      languages: validLanguages(input.languages) || defaultConfig.languages.slice(),
+      localeEnabled: input.localeEnabled === true,
+      locale: validLanguage(input.locale) || originalLocale,
+      fonts: input.fonts !== false,
+      rtc: input.rtc !== false,
+    };
+  }
+  let prefs = sanitize(GM_getValue(CONFIG_KEY, null));
+  const applied = structuredCloneSafe(prefs);
+  const zone = applied.timezone;
+  function structuredCloneSafe(value) { return JSON.parse(JSON.stringify(value)); }
+  function persist() { GM_setValue(CONFIG_KEY, structuredCloneSafe(prefs)); }
+  // These hooks apply in the page's JavaScript realm, not to HTTP headers or OS settings.
+
+
+  function installLanguageOverride() {
+    if (!applied.languageEnabled) return;
+    const languages = Object.freeze([...applied.languages]);
+    try {
+      Object.defineProperty(page.navigator, 'language', { configurable: true, get: () => languages[0] });
+      Object.defineProperty(page.navigator, 'languages', { configurable: true, get: () => [...languages] });
+    } catch { /* Verification will trigger a settings rollback. */ }
+  }
+  function installLocaleOverride() {
+    if (!applied.localeEnabled) return;
+    const locale = applied.locale;
+    const constructors = ['DateTimeFormat', 'NumberFormat', 'Collator', 'PluralRules',
+      'RelativeTimeFormat', 'ListFormat', 'DisplayNames', 'Segmenter'];
+    for (const key of constructors) {
+      const Native = page.Intl[key];
+      if (typeof Native !== 'function') continue;
+      function Localized(locales, options) {
+        return new Native(locales == null ? locale : locales, options);
+      }
+      Object.setPrototypeOf(Localized, Native);
+      Localized.prototype = Native.prototype;
+      try { Object.defineProperty(Localized, 'name', { value: key }); page.Intl[key] = Localized; }
+      catch { /* Unpatchable browser object; see verification. */ }
+    }
+    for (const method of ['toLocaleString', 'toLocaleDateString', 'toLocaleTimeString']) {
+      const nativeMethod = NativeDate.prototype[method];
+      if (typeof nativeMethod === 'function') {
+        NativeDate.prototype[method] = function (locales, options) {
+          return nativeMethod.call(this, locales == null ? locale : locales, options);
+        };
+      }
+    }
+    for (const proto of [page.Number?.prototype, page.BigInt?.prototype]) {
+      if (!proto || typeof proto.toLocaleString !== 'function') continue;
+      const original = proto.toLocaleString;
+      proto.toLocaleString = function (locales, options) {
+        return original.call(this, locales == null ? locale : locales, options);
+      };
     }
   }
 
-  const saved = GM_getValue(KEY, SYSTEM);
-  const zone = validateZone(saved) || SYSTEM;
-
-  function saveZone(input, message) {
-    const valid = validateZone(input);
-    if (!valid) {
-      if (message) message('Invalid time zone. Enter a valid IANA identifier, such as America/Phoenix.', true);
-      return false;
-    }
-    if (valid !== zone) GM_setValue(KEY, valid);
-    page.location.reload();
-    return true;
+  // Curated mainstream Chinese font families, not merely a list of five presets.
+  // The set covers Windows (including optional CJK packs), macOS/iOS,
+  // Linux, Android, Office/WPS, and common device-vendor font families.
+  const fontGroups = {
+    windows: `Microsoft YaHei|Microsoft YaHei UI|Microsoft YaHei Light|Microsoft YaHei UI Light|SimSun|NSimSun|SimSun-ExtB|SimSun-ExtG|SimHei|SimHei-ExtB|DengXian|DengXian Light|FangSong|FangSong_GB2312|KaiTi|KaiTi_GB2312|LiSu|YouYuan|STFangsong|STHeiti|STKaiti|STSong|STXihei|STZhongsong|STLiti|STCaiyun|STHupo|STXinwei|STXingkai|STYuan|MingLiU|PMingLiU|MingLiU_HKSCS|MingLiU-ExtB|PMingLiU-ExtB|MingLiU_HKSCS-ExtB|Microsoft JhengHei|Microsoft JhengHei UI|Microsoft JhengHei Light|Microsoft JhengHei UI Light|DFKai-SB|Arial Unicode MS|MS Song|MS Hei|BiauKai|MingLiU_HKSCS|SimKai|SimFang|Microsoft Himalaya|Microsoft New Tai Lue`,
+    apple: `PingFang SC|PingFang TC|PingFang HK|PingFang|Heiti SC|Heiti TC|Songti SC|Songti TC|Kaiti SC|Kaiti TC|Baoli SC|Baoli TC|Hiragino Sans GB|Hiragino Sans CNS|Hiragino Sans|Hiragino Mincho ProN|STSongti-SC-Regular|STSongti-TC-Regular|STKaiti-SC-Regular|STKaiti-TC-Regular|STHeitiSC-Light|STHeitiTC-Light|Apple LiGothic|Apple LiSung|LiHei Pro|LiSong Pro|Lantinghei SC|Lantinghei TC|Wawati SC|Wawati TC|Weibei SC|Weibei TC|Hanzipen SC|Hanzipen TC|Xingkai SC|Xingkai TC`,
+    opensource: `Noto Sans CJK SC|Noto Sans CJK TC|Noto Sans CJK HK|Noto Sans SC|Noto Sans TC|Noto Serif CJK SC|Noto Serif CJK TC|Noto Serif CJK HK|Noto Serif SC|Noto Serif TC|Noto Sans Mono CJK SC|Noto Sans Mono CJK TC|Source Han Sans SC|Source Han Sans TC|Source Han Sans HC|Source Han Sans CN|Source Han Sans TW|Source Han Sans|Source Han Serif SC|Source Han Serif TC|Source Han Serif CN|Source Han Serif TW|Source Han Serif|Source Han Mono SC|Source Han Mono TC|WenQuanYi Micro Hei|WenQuanYi Zen Hei|WenQuanYi Bitmap Song|AR PL UMing CN|AR PL UMing TW|AR PL UKai CN|AR PL UKai TW|AR PL SungtiL GB|AR PL KaitiM GB|Droid Sans Fallback|Droid Sans Chinese|Droid Sans Chinese Fallback|Droid Sans CJK|Droid Sans CJK SC|Droid Sans CJK TC|Sarasa Gothic SC|Sarasa Gothic TC|Sarasa UI SC|Sarasa UI TC|LXGW WenKai|LXGW WenKai Lite|LXGW WenKai Screen|HarmonyOS Sans SC|HarmonyOS Sans TC`,
+    vendors: `HarmonyOS Sans|HarmonyOS Sans Naskh Arabic|MiSans|MiSans VF|MiSans L3|MiSans Normal|OPPO Sans|OPPOSans|OPPO Sans 3.0|vivo Sans|vivo Sans 2.0|vivo Sans 3.0|HONOR Sans|Honor Sans|HONOR Sans CN|OnePlus Sans|OnePlus Sans 3.0|realme Sans|ColorOS Sans|Alibaba PuHuiTi|Alibaba PuHuiTi 2.0|Alibaba PuHuiTi 3.0|Alimama ShuHeiTi|Tencent Sans|TencentSans|Douyin Sans|ByteDance Sans|Smiley Sans|MIUI Sans|MIUI|WPS Office|WPS Song|WPS Hei|FZSong|FZHei|FZKai|FZFangSong|FZShuSong|FZLanTingHei|FZLanTingHeiS|Founder Type|FZNewShuSong|FZYaoTi|FZCuHeiSong|FZLiShu|FZWeiBei|FZDaHei-B02|FZKai-Z03|HYQiHei|HYHeiTi|HYSongTi|HYSong|HYKaiTi|HanYi|HanYi QiHei|Hanyi Senty|Kingsoft Office|Kingsoft UI`,
+  };
+  const localAliasNames = [
+    '\u5fae\u8f6f\u96c5\u9ed1', '\u5fae\u8f6f\u96c5\u9ed1UI', '\u5b8b\u4f53',
+    '\u65b0\u5b8b\u4f53', '\u9ed1\u4f53', '\u7b49\u7ebf', '\u4eff\u5b8b',
+    '\u6977\u4f53', '\u96b6\u4e66', '\u5e7c\u5706', '\u534e\u6587\u7ec6\u9ed1',
+    '\u534e\u6587\u9ed1\u4f53', '\u534e\u6587\u5b8b\u4f53', '\u534e\u6587\u6977\u4f53',
+    '\u534e\u6587\u4eff\u5b8b', '\u534e\u6587\u4e2d\u5b8b', '\u534e\u6587\u884c\u6977',
+    '\u534e\u6587\u96b6\u4e66', '\u534e\u6587\u65b0\u9b4f', '\u65b9\u6b63\u5170\u4ead\u9ed1',
+    '\u82f9\u65b9', '\u601d\u6e90\u9ed1\u4f53', '\u601d\u6e90\u5b8b\u4f53',
+    '\u9e3f\u8499\u9ed1\u4f53', '\u5c0f\u7c73\u5170\u4ead', '\u963f\u91cc\u5df4\u5df4\u666e\u60e0\u4f53',
+    '\u6c49\u4eea\u65d7\u9ed1', '\u6c49\u4eea\u5b8b\u4f53', '\u534e\u6587\u5f69\u4e91',
+    '\u534e\u6587\u7425\u73c0', '\u65b9\u6b63\u8212\u4f53', '\u65b9\u6b63\u59da\u4f53',
+    '\u51ac\u9752\u9ed1\u4f53', '\u4eff\u5b8b_GB2312', '\u6977\u4f53_GB2312',
+    '\u65b0\u7ec6\u660e\u4f53', '\u7ec6\u660e\u4f53', '\u6b63\u9ed1\u4f53',
+  ];
+  const fontFamilies = [...new Set([...Object.values(fontGroups).flatMap(s => s.split('|')),
+    ...localAliasNames])].filter(Boolean);
+  const fontTestPattern = new RegExp(fontFamilies
+    .sort((a, b) => b.length - a.length)
+    .map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|'), 'i');
+  function containsProtectedFont(text) { return typeof text === 'string' && fontTestPattern.test(text); }
+  function fallbackFor(font) {
+    const match = String(font).match(/,\s*(monospace|sans-serif|serif)\s*$/i);
+    return match ? match[1] : 'sans-serif';
   }
+  function installFontMask() {
+    // Hooks stay installed; disabling the toggle restores their native behavior.
+    const Ctx2D = page.CanvasRenderingContext2D?.prototype;
+    if (Ctx2D && typeof Ctx2D.measureText === 'function') {
+      const original = Ctx2D.measureText;
+      Ctx2D.measureText = function (...args) {
+        if (!applied.fonts || !containsProtectedFont(this.font)) return original.apply(this, args);
+        const oldFont = this.font;
+        try {
+          this.font = oldFont.replace(/\s+((?:["'][^"']+["']|[^\s,]+)(?:\s*,.*)?)$/, (_, families) => ' ' + fallbackFor(families));
+          if (containsProtectedFont(this.font)) this.font = '16px ' + fallbackFor(oldFont);
+          return original.apply(this, args);
+        } finally { this.font = oldFont; }
+      };
+    }
+    const Offscreen = page.OffscreenCanvasRenderingContext2D?.prototype;
+    if (Offscreen && Offscreen !== Ctx2D && typeof Offscreen.measureText === 'function') {
+      const original = Offscreen.measureText;
+      Offscreen.measureText = function (...args) {
+        if (!applied.fonts || !containsProtectedFont(this.font)) return original.apply(this, args);
+        const previous = this.font;
+        try {
+          this.font = previous.replace(/\s+((?:["'][^"']+["']|[^\s,]+)(?:\s*,.*)?)$/, (_, families) => ' ' + fallbackFor(families));
+          if (containsProtectedFont(this.font)) this.font = '16px ' + fallbackFor(previous);
+          return original.apply(this, args);
+        } finally { this.font = previous; }
+      };
+    }
+    const ffp = page.FontFaceSet?.prototype;
+    if (ffp && typeof ffp.check === 'function') {
+      const nativeCheck = ffp.check;
+      ffp.check = function (font, text) {
+        return applied.fonts && containsProtectedFont(font) ? false : nativeCheck.call(this, font, text);
+      };
+    }
+    if (typeof page.queryLocalFonts === 'function') {
+      const original = page.queryLocalFonts.bind(page);
+      try {
+        page.queryLocalFonts = async (...args) => {
+          const entries = await original(...args);
+          return applied.fonts ? entries.filter(f => !containsProtectedFont(
+            [f.family, f.fullName, f.postscriptName].join(' '))) : entries;
+        };
+      } catch { /* The browser may not expose a writable API. */ }
+    }
 
+    // Fingerprint probes frequently measure hidden, off-screen font samples.
+    // Modify reported measurements only for those hidden probes, never paint data.
+    const nativeRect = page.Element?.prototype?.getBoundingClientRect;
+    const offWidth = Object.getOwnPropertyDescriptor(page.HTMLElement?.prototype || {}, 'offsetWidth');
+    const offHeight = Object.getOwnPropertyDescriptor(page.HTMLElement?.prototype || {}, 'offsetHeight');
+    let probing = false;
+    function substituteMetrics(el) {
+      if (!applied.fonts || probing || !el?.ownerDocument?.body || !el.isConnected) return null;
+      try {
+        const style = page.getComputedStyle(el);
+        if (!containsProtectedFont(style.fontFamily)) return null;
+        const hidden = style.visibility === 'hidden' || style.opacity === '0' ||
+          (/^(absolute|fixed)$/.test(style.position) &&
+          (parseFloat(style.left) < -250 || parseFloat(style.top) < -250));
+        if (!hidden) return null;
+        probing = true;
+        const node = el.ownerDocument.createElement('span');
+        node.style.cssText = `position:absolute!important;visibility:hidden!important;pointer-events:none!important;left:-100000px!important;top:-100000px!important;display:inline-block!important;white-space:${style.whiteSpace}!important;font-size:${style.fontSize}!important;font-style:${style.fontStyle}!important;font-weight:${style.fontWeight}!important;letter-spacing:${style.letterSpacing}!important;line-height:${style.lineHeight}!important;font-family:${fallbackFor(style.fontFamily)}!important`;
+        node.textContent = el.textContent || '';
+        el.ownerDocument.body.appendChild(node);
+        const rect = nativeRect.call(node);
+        node.remove();
+        return { width: rect.width, height: rect.height };
+      } catch { return null; }
+      finally { probing = false; }
+    }
+    if (nativeRect) {
+      page.Element.prototype.getBoundingClientRect = function () {
+        const real = nativeRect.call(this);
+        const metrics = substituteMetrics(this);
+        return metrics && typeof page.DOMRect === 'function'
+          ? new page.DOMRect(real.x, real.y, metrics.width, metrics.height) : real;
+      };
+    }
+    for (const [desc, key] of [[offWidth, 'offsetWidth'], [offHeight, 'offsetHeight']]) {
+      if (desc?.configurable && typeof desc.get === 'function') {
+        Object.defineProperty(page.HTMLElement.prototype, key, {
+          configurable: true, enumerable: desc.enumerable,
+          get: function () {
+            const metrics = substituteMetrics(this);
+            return metrics ? Math.round(metrics[key === 'offsetWidth' ? 'width' : 'height']) : desc.get.call(this);
+          },
+        });
+      }
+    }
+  }
+  installLanguageOverride();
   if (zone !== SYSTEM) {
     const dtfParts = new NativeDTF('en-US-u-ca-gregory-nu-latn', {
       timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
@@ -324,304 +525,644 @@
       }
     } catch { /* Some browser implementations disallow this override. */ }
   }
+  installLocaleOverride();
+  installFontMask();
 
+  function verifySync(key) {
+    try {
+      switch (key) {
+        case 'timezone': {
+          if (applied.timezone === SYSTEM) return true;
+          const actual = new page.Intl.DateTimeFormat().resolvedOptions().timeZone;
+          const expected = validZone(applied.timezone);
+          if (actual !== expected) return false;
+          const sample = new NativeDate();
+          const dtf = new NativeDTF('en-US-u-ca-gregory-nu-latn', {
+            timeZone: applied.timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+          });
+          const p = Object.fromEntries(dtf.formatToParts(sample).filter(x => x.type !== 'literal')
+            .map(x => [x.type, Number(x.value)]));
+          return sample.getFullYear() === p.year && sample.getMonth() + 1 === p.month &&
+            sample.getDate() === p.day && sample.getHours() === p.hour;
+        }
+        case 'languageEnabled':
+        case 'languages':
+          return !applied.languageEnabled || (
+            page.navigator.language === applied.languages[0] &&
+            JSON.stringify([...page.navigator.languages]) === JSON.stringify(applied.languages));
+        case 'localeEnabled':
+        case 'locale':
+          return !applied.localeEnabled || new page.Intl.DateTimeFormat().resolvedOptions().locale ===
+            new NativeDTF(applied.locale).resolvedOptions().locale;
+        case 'fonts': {
+          if (!applied.fonts) return true;
+          const canvas = page.document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return false;
+          ctx.font = '18px "Microsoft YaHei", monospace';
+          const a = ctx.measureText('Test text').width;
+          ctx.font = '18px monospace';
+          const b = ctx.measureText('Test text').width;
+          if (Math.abs(a - b) > 0.01) return false;
+          if (page.document.fonts?.check?.('18px "Microsoft YaHei"') !== false) return false;
+          return true;
+        }
+        case 'rtc': return !applied.rtc || typeof page.RTCPeerConnection === 'function';
+        default: return true;
+      }
+    } catch { return false; }
+  }
 
-  // A single Tampermonkey script store is shared by all matched domains.
-  if (typeof GM_addValueChangeListener === 'function') {
-    GM_addValueChangeListener(KEY, (_name, _oldValue, newValue, remote) => {
-      if (remote && newValue !== zone) page.location.reload();
+  let restoredMessage = GM_getValue(NOTICE_KEY, '');
+  if (restoredMessage) GM_setValue(NOTICE_KEY, '');
+  const pending = GM_getValue(PENDING_KEY, null);
+  if (pending && typeof pending === 'object' && pending.before && Array.isArray(pending.keys)) {
+    const failed = pending.keys.filter(key => !verifySync(key));
+    if (failed.length) {
+      for (const key of failed) { prefs[key] = pending.before[key]; applied[key] = pending.before[key]; }
+      persist();
+      restoredMessage = `Verification failed for ${failed.join(', ')}. Previous values restored. Reload manually to restore page behavior.`;
+      GM_setValue(NOTICE_KEY, restoredMessage);
+    } else {
+      restoredMessage = 'Settings applied and verified.';
+    }
+    GM_setValue(PENDING_KEY, null);
+  }
+  // Verify defaults too. An unsupported browser must not show a false ON state.
+  if (applied.fonts && !verifySync('fonts')) {
+    applied.fonts = false;
+    prefs.fonts = false;
+    persist();
+    restoredMessage = 'Font protection could not be verified and was switched off.';
+  }
+  if (applied.rtc && !verifySync('rtc')) {
+    applied.rtc = false;
+    prefs.rtc = false;
+    persist();
+    restoredMessage = 'WebRTC checking is unavailable in this browser and was switched off.';
+  }
+
+  function commit(key, value, requireReload) {
+    if (!Object.prototype.hasOwnProperty.call(prefs, key)) return { ok: false, info: 'Unknown setting.' };
+    const before = structuredCloneSafe(prefs[key]);
+    if (JSON.stringify(before) === JSON.stringify(value)) return { ok: true, info: 'Already selected.' };
+    if (requireReload) {
+      let queue = GM_getValue(PENDING_KEY, null);
+      if (!queue || !queue.before || !Array.isArray(queue.keys)) queue = { before: {}, keys: [] };
+      if (!queue.keys.includes(key)) { queue.keys.push(key); queue.before[key] = before; }
+      prefs[key] = value;
+      persist();
+      GM_setValue(PENDING_KEY, queue);
+      // Never refresh until the user explicitly approves the prompt.
+      const approve = page.confirm('Setting saved. Reload this page now to apply and verify it?');
+      if (approve) page.location.reload();
+      return { ok: true, info: approve ? 'Reloading for verification...' : 'Saved. Reload manually when ready; verification will run then.' };
+    }
+    prefs[key] = value;
+    applied[key] = value;
+    if (!verifySync(key)) {
+      prefs[key] = before;
+      applied[key] = before;
+      return { ok: false, info: 'Verification failed. The switch has returned to its previous state.' };
+    }
+    persist();
+    return { ok: true, info: 'Saved and verified.' };
+  }
+
+  const rtcState = { state: 'checking', details: 'Starting external WebRTC check...' };
+  const subscribers = new Set();
+  function updateRtc(state, details) {
+    rtcState.state = state;
+    rtcState.details = details;
+    for (const callback of subscribers) { try { callback(); } catch {} }
+  }
+  function ipv4(ip) {
+    const values = String(ip).split('.');
+    return values.length === 4 && values.every(s => /^\d{1,3}$/.test(s) && Number(s) <= 255);
+  }
+  function publicIPv4(ip) {
+    if (!ipv4(ip)) return false;
+    const [a, b] = ip.split('.').map(Number);
+    if (a === 10 || a === 127 || a === 0 || a >= 224) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    return true;
+  }
+  function externalIPv4() {
+    return new Promise(resolve => {
+      if (typeof GM_xmlhttpRequest !== 'function') return resolve(null);
+      try {
+        GM_xmlhttpRequest({
+          method: 'GET', url: 'https://api.ipify.org?format=json', timeout: 5500,
+          onload: response => {
+            try {
+              const ip = JSON.parse(response.responseText).ip;
+              resolve(ipv4(ip) ? ip : null);
+            } catch { resolve(null); }
+          },
+          onerror: () => resolve(null), ontimeout: () => resolve(null),
+        });
+      } catch { resolve(null); }
     });
   }
-
-  // The live browser list is authoritative. This static fallback covers older browsers.
-  const fallbackZones = ["Africa/Abidjan","Africa/Accra","Africa/Addis_Ababa","Africa/Algiers","Africa/Asmara","Africa/Asmera","Africa/Bamako","Africa/Bangui","Africa/Banjul","Africa/Bissau","Africa/Blantyre","Africa/Brazzaville","Africa/Bujumbura","Africa/Cairo","Africa/Casablanca","Africa/Ceuta","Africa/Conakry","Africa/Dakar","Africa/Dar_es_Salaam","Africa/Djibouti","Africa/Douala","Africa/El_Aaiun","Africa/Freetown","Africa/Gaborone","Africa/Harare","Africa/Johannesburg","Africa/Juba","Africa/Kampala","Africa/Khartoum","Africa/Kigali","Africa/Kinshasa","Africa/Lagos","Africa/Libreville","Africa/Lome","Africa/Luanda","Africa/Lubumbashi","Africa/Lusaka","Africa/Malabo","Africa/Maputo","Africa/Maseru","Africa/Mbabane","Africa/Mogadishu","Africa/Monrovia","Africa/Nairobi","Africa/Ndjamena","Africa/Niamey","Africa/Nouakchott","Africa/Ouagadougou","Africa/Porto-Novo","Africa/Sao_Tome","Africa/Timbuktu","Africa/Tripoli","Africa/Tunis","Africa/Windhoek","America/Adak","America/Anchorage","America/Anguilla","America/Antigua","America/Araguaina","America/Argentina/Buenos_Aires","America/Argentina/Catamarca","America/Argentina/ComodRivadavia","America/Argentina/Cordoba","America/Argentina/Jujuy","America/Argentina/La_Rioja","America/Argentina/Mendoza","America/Argentina/Rio_Gallegos","America/Argentina/Salta","America/Argentina/San_Juan","America/Argentina/San_Luis","America/Argentina/Tucuman","America/Argentina/Ushuaia","America/Aruba","America/Asuncion","America/Atikokan","America/Atka","America/Bahia","America/Bahia_Banderas","America/Barbados","America/Belem","America/Belize","America/Blanc-Sablon","America/Boa_Vista","America/Bogota","America/Boise","America/Buenos_Aires","America/Cambridge_Bay","America/Campo_Grande","America/Cancun","America/Caracas","America/Catamarca","America/Cayenne","America/Cayman","America/Chicago","America/Chihuahua","America/Ciudad_Juarez","America/Coral_Harbour","America/Cordoba","America/Costa_Rica","America/Coyhaique","America/Creston","America/Cuiaba","America/Curacao","America/Danmarkshavn","America/Dawson","America/Dawson_Creek","America/Denver","America/Detroit","America/Dominica","America/Edmonton","America/Eirunepe","America/El_Salvador","America/Ensenada","America/Fort_Nelson","America/Fort_Wayne","America/Fortaleza","America/Glace_Bay","America/Godthab","America/Goose_Bay","America/Grand_Turk","America/Grenada","America/Guadeloupe","America/Guatemala","America/Guayaquil","America/Guyana","America/Halifax","America/Havana","America/Hermosillo","America/Indiana/Indianapolis","America/Indiana/Knox","America/Indiana/Marengo","America/Indiana/Petersburg","America/Indiana/Tell_City","America/Indiana/Vevay","America/Indiana/Vincennes","America/Indiana/Winamac","America/Indianapolis","America/Inuvik","America/Iqaluit","America/Jamaica","America/Jujuy","America/Juneau","America/Kentucky/Louisville","America/Kentucky/Monticello","America/Knox_IN","America/Kralendijk","America/La_Paz","America/Lima","America/Los_Angeles","America/Louisville","America/Lower_Princes","America/Maceio","America/Managua","America/Manaus","America/Marigot","America/Martinique","America/Matamoros","America/Mazatlan","America/Mendoza","America/Menominee","America/Merida","America/Metlakatla","America/Mexico_City","America/Miquelon","America/Moncton","America/Monterrey","America/Montevideo","America/Montreal","America/Montserrat","America/Nassau","America/New_York","America/Nipigon","America/Nome","America/Noronha","America/North_Dakota/Beulah","America/North_Dakota/Center","America/North_Dakota/New_Salem","America/Nuuk","America/Ojinaga","America/Panama","America/Pangnirtung","America/Paramaribo","America/Phoenix","America/Port-au-Prince","America/Port_of_Spain","America/Porto_Acre","America/Porto_Velho","America/Puerto_Rico","America/Punta_Arenas","America/Rainy_River","America/Rankin_Inlet","America/Recife","America/Regina","America/Resolute","America/Rio_Branco","America/Rosario","America/Santa_Isabel","America/Santarem","America/Santiago","America/Santo_Domingo","America/Sao_Paulo","America/Scoresbysund","America/Shiprock","America/Sitka","America/St_Barthelemy","America/St_Johns","America/St_Kitts","America/St_Lucia","America/St_Thomas","America/St_Vincent","America/Swift_Current","America/Tegucigalpa","America/Thule","America/Thunder_Bay","America/Tijuana","America/Toronto","America/Tortola","America/Vancouver","America/Virgin","America/Whitehorse","America/Winnipeg","America/Yakutat","America/Yellowknife","Antarctica/Casey","Antarctica/Davis","Antarctica/DumontDUrville","Antarctica/Macquarie","Antarctica/Mawson","Antarctica/McMurdo","Antarctica/Palmer","Antarctica/Rothera","Antarctica/South_Pole","Antarctica/Syowa","Antarctica/Troll","Antarctica/Vostok","Arctic/Longyearbyen","Asia/Aden","Asia/Almaty","Asia/Amman","Asia/Anadyr","Asia/Aqtau","Asia/Aqtobe","Asia/Ashgabat","Asia/Ashkhabad","Asia/Atyrau","Asia/Baghdad","Asia/Bahrain","Asia/Baku","Asia/Bangkok","Asia/Barnaul","Asia/Beirut","Asia/Bishkek","Asia/Brunei","Asia/Calcutta","Asia/Chita","Asia/Choibalsan","Asia/Chongqing","Asia/Chungking","Asia/Colombo","Asia/Dacca","Asia/Damascus","Asia/Dhaka","Asia/Dili","Asia/Dubai","Asia/Dushanbe","Asia/Famagusta","Asia/Gaza","Asia/Harbin","Asia/Hebron","Asia/Ho_Chi_Minh","Asia/Hong_Kong","Asia/Hovd","Asia/Irkutsk","Asia/Istanbul","Asia/Jakarta","Asia/Jayapura","Asia/Jerusalem","Asia/Kabul","Asia/Kamchatka","Asia/Karachi","Asia/Kashgar","Asia/Kathmandu","Asia/Katmandu","Asia/Khandyga","Asia/Kolkata","Asia/Krasnoyarsk","Asia/Kuala_Lumpur","Asia/Kuching","Asia/Kuwait","Asia/Macao","Asia/Macau","Asia/Magadan","Asia/Makassar","Asia/Manila","Asia/Muscat","Asia/Nicosia","Asia/Novokuznetsk","Asia/Novosibirsk","Asia/Omsk","Asia/Oral","Asia/Phnom_Penh","Asia/Pontianak","Asia/Pyongyang","Asia/Qatar","Asia/Qostanay","Asia/Qyzylorda","Asia/Rangoon","Asia/Riyadh","Asia/Saigon","Asia/Sakhalin","Asia/Samarkand","Asia/Seoul","Asia/Shanghai","Asia/Singapore","Asia/Srednekolymsk","Asia/Taipei","Asia/Tashkent","Asia/Tbilisi","Asia/Tehran","Asia/Tel_Aviv","Asia/Thimbu","Asia/Thimphu","Asia/Tokyo","Asia/Tomsk","Asia/Ujung_Pandang","Asia/Ulaanbaatar","Asia/Ulan_Bator","Asia/Urumqi","Asia/Ust-Nera","Asia/Vientiane","Asia/Vladivostok","Asia/Yakutsk","Asia/Yangon","Asia/Yekaterinburg","Asia/Yerevan","Atlantic/Azores","Atlantic/Bermuda","Atlantic/Canary","Atlantic/Cape_Verde","Atlantic/Faeroe","Atlantic/Faroe","Atlantic/Jan_Mayen","Atlantic/Madeira","Atlantic/Reykjavik","Atlantic/South_Georgia","Atlantic/St_Helena","Atlantic/Stanley","Australia/ACT","Australia/Adelaide","Australia/Brisbane","Australia/Broken_Hill","Australia/Canberra","Australia/Currie","Australia/Darwin","Australia/Eucla","Australia/Hobart","Australia/LHI","Australia/Lindeman","Australia/Lord_Howe","Australia/Melbourne","Australia/NSW","Australia/North","Australia/Perth","Australia/Queensland","Australia/South","Australia/Sydney","Australia/Tasmania","Australia/Victoria","Australia/West","Australia/Yancowinna","Brazil/Acre","Brazil/DeNoronha","Brazil/East","Brazil/West","Canada/Atlantic","Canada/Central","Canada/Eastern","Canada/Mountain","Canada/Newfoundland","Canada/Pacific","Canada/Saskatchewan","Canada/Yukon","Chile/Continental","Chile/EasterIsland","Europe/Amsterdam","Europe/Andorra","Europe/Astrakhan","Europe/Athens","Europe/Belfast","Europe/Belgrade","Europe/Berlin","Europe/Bratislava","Europe/Brussels","Europe/Bucharest","Europe/Budapest","Europe/Busingen","Europe/Chisinau","Europe/Copenhagen","Europe/Dublin","Europe/Gibraltar","Europe/Guernsey","Europe/Helsinki","Europe/Isle_of_Man","Europe/Istanbul","Europe/Jersey","Europe/Kaliningrad","Europe/Kiev","Europe/Kirov","Europe/Kyiv","Europe/Lisbon","Europe/Ljubljana","Europe/London","Europe/Luxembourg","Europe/Madrid","Europe/Malta","Europe/Mariehamn","Europe/Minsk","Europe/Monaco","Europe/Moscow","Europe/Nicosia","Europe/Oslo","Europe/Paris","Europe/Podgorica","Europe/Prague","Europe/Riga","Europe/Rome","Europe/Samara","Europe/San_Marino","Europe/Sarajevo","Europe/Saratov","Europe/Simferopol","Europe/Skopje","Europe/Sofia","Europe/Stockholm","Europe/Tallinn","Europe/Tirane","Europe/Tiraspol","Europe/Ulyanovsk","Europe/Uzhgorod","Europe/Vaduz","Europe/Vatican","Europe/Vienna","Europe/Vilnius","Europe/Volgograd","Europe/Warsaw","Europe/Zagreb","Europe/Zaporozhye","Europe/Zurich","Indian/Antananarivo","Indian/Chagos","Indian/Christmas","Indian/Cocos","Indian/Comoro","Indian/Kerguelen","Indian/Mahe","Indian/Maldives","Indian/Mauritius","Indian/Mayotte","Indian/Reunion","Mexico/BajaNorte","Mexico/BajaSur","Mexico/General","Pacific/Apia","Pacific/Auckland","Pacific/Bougainville","Pacific/Chatham","Pacific/Chuuk","Pacific/Easter","Pacific/Efate","Pacific/Enderbury","Pacific/Fakaofo","Pacific/Fiji","Pacific/Funafuti","Pacific/Galapagos","Pacific/Gambier","Pacific/Guadalcanal","Pacific/Guam","Pacific/Honolulu","Pacific/Johnston","Pacific/Kanton","Pacific/Kiritimati","Pacific/Kosrae","Pacific/Kwajalein","Pacific/Majuro","Pacific/Marquesas","Pacific/Midway","Pacific/Nauru","Pacific/Niue","Pacific/Norfolk","Pacific/Noumea","Pacific/Pago_Pago","Pacific/Palau","Pacific/Pitcairn","Pacific/Pohnpei","Pacific/Ponape","Pacific/Port_Moresby","Pacific/Rarotonga","Pacific/Saipan","Pacific/Samoa","Pacific/Tahiti","Pacific/Tarawa","Pacific/Tongatapu","Pacific/Truk","Pacific/Wake","Pacific/Wallis","Pacific/Yap","US/Alaska","US/Aleutian","US/Arizona","US/Central","US/East-Indiana","US/Eastern","US/Hawaii","US/Indiana-Starke","US/Michigan","US/Mountain","US/Pacific","US/Samoa"];
-  function getSupportedZones() {
-    let values = [];
-    try {
-      if (typeof page.Intl.supportedValuesOf === 'function') {
-        values = page.Intl.supportedValuesOf('timeZone');
+  function iceCandidates() {
+    return new Promise(resolve => {
+      if (typeof page.RTCPeerConnection !== 'function') return resolve({ candidates: [], error: 'WebRTC unavailable' });
+      let pc = null;
+      let completed = false;
+      const candidates = [];
+      const finish = error => {
+        if (completed) return;
+        completed = true;
+        clearTimeout(timeout);
+        try { pc?.close(); } catch {}
+        resolve({ candidates, error: error || null });
+      };
+      const timeout = setTimeout(() => finish('ICE gathering timed out'), 7200);
+      try {
+        pc = new page.RTCPeerConnection({ iceServers: [
+          { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+        ] });
+        pc.onicecandidate = ev => {
+          if (!ev.candidate) return finish(null);
+          const match = /(?:^|\s)(\d+|[\da-f]+)\s+(\d+|udp|tcp)\s+\d+\s+([^\s]+)\s+\d+\s+typ\s+(host|srflx|relay|prflx)/i
+            .exec(ev.candidate.candidate || '');
+          if (match) candidates.push({ ip: match[3], type: match[4] });
+        };
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === 'complete') finish(null);
+        };
+        pc.createDataChannel('network-check');
+        pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(err => finish(err.message));
+      } catch (err) { finish(err.message); }
+    });
+  }
+  let rtcRunning = null;
+  async function runRtcCheck() {
+    if (!applied.rtc) { updateRtc('off', 'Automatic checking is disabled.'); return; }
+    if (rtcRunning) return rtcRunning;
+    updateRtc('checking', 'Testing network candidates with external STUN and public IP services...');
+    rtcRunning = (async () => {
+      const [publicIp, result] = await Promise.all([externalIPv4(), iceCandidates()]);
+      if (!applied.rtc) { updateRtc('off', 'Automatic checking is disabled.'); return; }
+      const rawLocal = result.candidates.filter(c => c.type === 'host' &&
+        ipv4(c.ip) && !c.ip.endsWith('.local'));
+      const peerV4 = [...new Set(result.candidates.filter(c =>
+        (c.type === 'srflx' || c.type === 'prflx' || c.type === 'host') && publicIPv4(c.ip))
+        .map(c => c.ip))];
+      const mismatched = publicIp && peerV4.filter(ip => ip !== publicIp);
+      if (mismatched?.length) {
+        updateRtc('leak', `WebRTC exposed ${mismatched.join(', ')}, different from the HTTP exit IP ${publicIp}.`);
+      } else if (rawLocal.length) {
+        updateRtc('leak', 'WebRTC exposed an unmasked local IPv4 address to the page.');
+      } else if (!publicIp) {
+        updateRtc('unknown', 'The public IP check did not finish; no reliable comparison is possible.');
+      } else if (result.error || !result.candidates.length) {
+        updateRtc('unknown', `No conclusive candidates (${result.error || 'none returned'}).`);
+      } else {
+        updateRtc('safe', `No mismatch in observed IPv4 candidates. HTTP exit IP: ${publicIp}. IPv6 and unobserved paths are not verified.`);
       }
-    } catch { /* Fall back to the bundled IANA directory. */ }
-    if (!Array.isArray(values) || values.length === 0) values = fallbackZones;
-    return [...new Set(['UTC', ...values, ...(zone !== SYSTEM ? [zone] : [])])].sort();
+    })().catch(err => updateRtc('unknown', `Check could not complete: ${err.message}`)).finally(() => { rtcRunning = null; });
+    return rtcRunning;
   }
 
-  let openPicker = null;
+  const fallbackZones = ["Africa/Abidjan","Africa/Accra","Africa/Addis_Ababa","Africa/Algiers","Africa/Asmara","Africa/Asmera","Africa/Bamako","Africa/Bangui","Africa/Banjul","Africa/Bissau","Africa/Blantyre","Africa/Brazzaville","Africa/Bujumbura","Africa/Cairo","Africa/Casablanca","Africa/Ceuta","Africa/Conakry","Africa/Dakar","Africa/Dar_es_Salaam","Africa/Djibouti","Africa/Douala","Africa/El_Aaiun","Africa/Freetown","Africa/Gaborone","Africa/Harare","Africa/Johannesburg","Africa/Juba","Africa/Kampala","Africa/Khartoum","Africa/Kigali","Africa/Kinshasa","Africa/Lagos","Africa/Libreville","Africa/Lome","Africa/Luanda","Africa/Lubumbashi","Africa/Lusaka","Africa/Malabo","Africa/Maputo","Africa/Maseru","Africa/Mbabane","Africa/Mogadishu","Africa/Monrovia","Africa/Nairobi","Africa/Ndjamena","Africa/Niamey","Africa/Nouakchott","Africa/Ouagadougou","Africa/Porto-Novo","Africa/Sao_Tome","Africa/Timbuktu","Africa/Tripoli","Africa/Tunis","Africa/Windhoek","America/Adak","America/Anchorage","America/Anguilla","America/Antigua","America/Araguaina","America/Argentina/Buenos_Aires","America/Argentina/Catamarca","America/Argentina/ComodRivadavia","America/Argentina/Cordoba","America/Argentina/Jujuy","America/Argentina/La_Rioja","America/Argentina/Mendoza","America/Argentina/Rio_Gallegos","America/Argentina/Salta","America/Argentina/San_Juan","America/Argentina/San_Luis","America/Argentina/Tucuman","America/Argentina/Ushuaia","America/Aruba","America/Asuncion","America/Atikokan","America/Atka","America/Bahia","America/Bahia_Banderas","America/Barbados","America/Belem","America/Belize","America/Blanc-Sablon","America/Boa_Vista","America/Bogota","America/Boise","America/Buenos_Aires","America/Cambridge_Bay","America/Campo_Grande","America/Cancun","America/Caracas","America/Catamarca","America/Cayenne","America/Cayman","America/Chicago","America/Chihuahua","America/Ciudad_Juarez","America/Coral_Harbour","America/Cordoba","America/Costa_Rica","America/Coyhaique","America/Creston","America/Cuiaba","America/Curacao","America/Danmarkshavn","America/Dawson","America/Dawson_Creek","America/Denver","America/Detroit","America/Dominica","America/Edmonton","America/Eirunepe","America/El_Salvador","America/Ensenada","America/Fort_Nelson","America/Fort_Wayne","America/Fortaleza","America/Glace_Bay","America/Godthab","America/Goose_Bay","America/Grand_Turk","America/Grenada","America/Guadeloupe","America/Guatemala","America/Guayaquil","America/Guyana","America/Halifax","America/Havana","America/Hermosillo","America/Indiana/Indianapolis","America/Indiana/Knox","America/Indiana/Marengo","America/Indiana/Petersburg","America/Indiana/Tell_City","America/Indiana/Vevay","America/Indiana/Vincennes","America/Indiana/Winamac","America/Indianapolis","America/Inuvik","America/Iqaluit","America/Jamaica","America/Jujuy","America/Juneau","America/Kentucky/Louisville","America/Kentucky/Monticello","America/Knox_IN","America/Kralendijk","America/La_Paz","America/Lima","America/Los_Angeles","America/Louisville","America/Lower_Princes","America/Maceio","America/Managua","America/Manaus","America/Marigot","America/Martinique","America/Matamoros","America/Mazatlan","America/Mendoza","America/Menominee","America/Merida","America/Metlakatla","America/Mexico_City","America/Miquelon","America/Moncton","America/Monterrey","America/Montevideo","America/Montreal","America/Montserrat","America/Nassau","America/New_York","America/Nipigon","America/Nome","America/Noronha","America/North_Dakota/Beulah","America/North_Dakota/Center","America/North_Dakota/New_Salem","America/Nuuk","America/Ojinaga","America/Panama","America/Pangnirtung","America/Paramaribo","America/Phoenix","America/Port-au-Prince","America/Port_of_Spain","America/Porto_Acre","America/Porto_Velho","America/Puerto_Rico","America/Punta_Arenas","America/Rainy_River","America/Rankin_Inlet","America/Recife","America/Regina","America/Resolute","America/Rio_Branco","America/Rosario","America/Santa_Isabel","America/Santarem","America/Santiago","America/Santo_Domingo","America/Sao_Paulo","America/Scoresbysund","America/Shiprock","America/Sitka","America/St_Barthelemy","America/St_Johns","America/St_Kitts","America/St_Lucia","America/St_Thomas","America/St_Vincent","America/Swift_Current","America/Tegucigalpa","America/Thule","America/Thunder_Bay","America/Tijuana","America/Toronto","America/Tortola","America/Vancouver","America/Virgin","America/Whitehorse","America/Winnipeg","America/Yakutat","America/Yellowknife","Antarctica/Casey","Antarctica/Davis","Antarctica/DumontDUrville","Antarctica/Macquarie","Antarctica/Mawson","Antarctica/McMurdo","Antarctica/Palmer","Antarctica/Rothera","Antarctica/South_Pole","Antarctica/Syowa","Antarctica/Troll","Antarctica/Vostok","Arctic/Longyearbyen","Asia/Aden","Asia/Almaty","Asia/Amman","Asia/Anadyr","Asia/Aqtau","Asia/Aqtobe","Asia/Ashgabat","Asia/Ashkhabad","Asia/Atyrau","Asia/Baghdad","Asia/Bahrain","Asia/Baku","Asia/Bangkok","Asia/Barnaul","Asia/Beirut","Asia/Bishkek","Asia/Brunei","Asia/Calcutta","Asia/Chita","Asia/Choibalsan","Asia/Chongqing","Asia/Chungking","Asia/Colombo","Asia/Dacca","Asia/Damascus","Asia/Dhaka","Asia/Dili","Asia/Dubai","Asia/Dushanbe","Asia/Famagusta","Asia/Gaza","Asia/Harbin","Asia/Hebron","Asia/Ho_Chi_Minh","Asia/Hong_Kong","Asia/Hovd","Asia/Irkutsk","Asia/Istanbul","Asia/Jakarta","Asia/Jayapura","Asia/Jerusalem","Asia/Kabul","Asia/Kamchatka","Asia/Karachi","Asia/Kashgar","Asia/Kathmandu","Asia/Katmandu","Asia/Khandyga","Asia/Kolkata","Asia/Krasnoyarsk","Asia/Kuala_Lumpur","Asia/Kuching","Asia/Kuwait","Asia/Macao","Asia/Macau","Asia/Magadan","Asia/Makassar","Asia/Manila","Asia/Muscat","Asia/Nicosia","Asia/Novokuznetsk","Asia/Novosibirsk","Asia/Omsk","Asia/Oral","Asia/Phnom_Penh","Asia/Pontianak","Asia/Pyongyang","Asia/Qatar","Asia/Qostanay","Asia/Qyzylorda","Asia/Rangoon","Asia/Riyadh","Asia/Saigon","Asia/Sakhalin","Asia/Samarkand","Asia/Seoul","Asia/Shanghai","Asia/Singapore","Asia/Srednekolymsk","Asia/Taipei","Asia/Tashkent","Asia/Tbilisi","Asia/Tehran","Asia/Tel_Aviv","Asia/Thimbu","Asia/Thimphu","Asia/Tokyo","Asia/Tomsk","Asia/Ujung_Pandang","Asia/Ulaanbaatar","Asia/Ulan_Bator","Asia/Urumqi","Asia/Ust-Nera","Asia/Vientiane","Asia/Vladivostok","Asia/Yakutsk","Asia/Yangon","Asia/Yekaterinburg","Asia/Yerevan","Atlantic/Azores","Atlantic/Bermuda","Atlantic/Canary","Atlantic/Cape_Verde","Atlantic/Faeroe","Atlantic/Faroe","Atlantic/Jan_Mayen","Atlantic/Madeira","Atlantic/Reykjavik","Atlantic/South_Georgia","Atlantic/St_Helena","Atlantic/Stanley","Australia/ACT","Australia/Adelaide","Australia/Brisbane","Australia/Broken_Hill","Australia/Canberra","Australia/Currie","Australia/Darwin","Australia/Eucla","Australia/Hobart","Australia/LHI","Australia/Lindeman","Australia/Lord_Howe","Australia/Melbourne","Australia/NSW","Australia/North","Australia/Perth","Australia/Queensland","Australia/South","Australia/Sydney","Australia/Tasmania","Australia/Victoria","Australia/West","Australia/Yancowinna","Brazil/Acre","Brazil/DeNoronha","Brazil/East","Brazil/West","Canada/Atlantic","Canada/Central","Canada/Eastern","Canada/Mountain","Canada/Newfoundland","Canada/Pacific","Canada/Saskatchewan","Canada/Yukon","Chile/Continental","Chile/EasterIsland","Europe/Amsterdam","Europe/Andorra","Europe/Astrakhan","Europe/Athens","Europe/Belfast","Europe/Belgrade","Europe/Berlin","Europe/Bratislava","Europe/Brussels","Europe/Bucharest","Europe/Budapest","Europe/Busingen","Europe/Chisinau","Europe/Copenhagen","Europe/Dublin","Europe/Gibraltar","Europe/Guernsey","Europe/Helsinki","Europe/Isle_of_Man","Europe/Istanbul","Europe/Jersey","Europe/Kaliningrad","Europe/Kiev","Europe/Kirov","Europe/Kyiv","Europe/Lisbon","Europe/Ljubljana","Europe/London","Europe/Luxembourg","Europe/Madrid","Europe/Malta","Europe/Mariehamn","Europe/Minsk","Europe/Monaco","Europe/Moscow","Europe/Nicosia","Europe/Oslo","Europe/Paris","Europe/Podgorica","Europe/Prague","Europe/Riga","Europe/Rome","Europe/Samara","Europe/San_Marino","Europe/Sarajevo","Europe/Saratov","Europe/Simferopol","Europe/Skopje","Europe/Sofia","Europe/Stockholm","Europe/Tallinn","Europe/Tirane","Europe/Tiraspol","Europe/Ulyanovsk","Europe/Uzhgorod","Europe/Vaduz","Europe/Vatican","Europe/Vienna","Europe/Vilnius","Europe/Volgograd","Europe/Warsaw","Europe/Zagreb","Europe/Zaporozhye","Europe/Zurich","Indian/Antananarivo","Indian/Chagos","Indian/Christmas","Indian/Cocos","Indian/Comoro","Indian/Kerguelen","Indian/Mahe","Indian/Maldives","Indian/Mauritius","Indian/Mayotte","Indian/Reunion","Mexico/BajaNorte","Mexico/BajaSur","Mexico/General","Pacific/Apia","Pacific/Auckland","Pacific/Bougainville","Pacific/Chatham","Pacific/Chuuk","Pacific/Easter","Pacific/Efate","Pacific/Enderbury","Pacific/Fakaofo","Pacific/Fiji","Pacific/Funafuti","Pacific/Galapagos","Pacific/Gambier","Pacific/Guadalcanal","Pacific/Guam","Pacific/Honolulu","Pacific/Johnston","Pacific/Kanton","Pacific/Kiritimati","Pacific/Kosrae","Pacific/Kwajalein","Pacific/Majuro","Pacific/Marquesas","Pacific/Midway","Pacific/Nauru","Pacific/Niue","Pacific/Norfolk","Pacific/Noumea","Pacific/Pago_Pago","Pacific/Palau","Pacific/Pitcairn","Pacific/Pohnpei","Pacific/Ponape","Pacific/Port_Moresby","Pacific/Rarotonga","Pacific/Saipan","Pacific/Samoa","Pacific/Tahiti","Pacific/Tarawa","Pacific/Tongatapu","Pacific/Truk","Pacific/Wake","Pacific/Wallis","Pacific/Yap","US/Alaska","US/Aleutian","US/Arizona","US/Central","US/East-Indiana","US/Eastern","US/Hawaii","US/Indiana-Starke","US/Michigan","US/Mountain","US/Pacific","US/Samoa"];
+  // An enumerable language directory is not provided by browsers. This list
+  // includes browser-reported languages and many supported BCP-47 language IDs.
+  const languageCodes = `aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br bs ca ce ch co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa wo xh yi yo za zh zu`.split(' ');
+  const regionalLocales = `en-US en-GB en-AU en-CA en-IN en-NZ zh-CN zh-TW zh-HK zh-SG zh-MO zh-Hans zh-Hant ja-JP ko-KR fr-FR fr-CA fr-BE fr-CH de-DE de-AT de-CH es-ES es-MX es-AR es-CO es-CL es-US pt-BR pt-PT ru-RU it-IT nl-NL nl-BE ar-SA ar-EG ar-AE ar-MA hi-IN bn-BD bn-IN ur-PK ur-IN pa-IN pa-PK ta-IN ta-LK te-IN mr-IN gu-IN kn-IN ml-IN th-TH vi-VN id-ID ms-MY fil-PH tr-TR pl-PL uk-UA ro-RO hu-HU cs-CZ sk-SK sl-SI hr-HR sr-RS sr-Latn-RS bg-BG el-GR he-IL fa-IR sv-SE no-NO nb-NO nn-NO da-DK fi-FI is-IS et-EE lv-LV lt-LT sw-KE sw-TZ af-ZA zu-ZA am-ET so-SO ne-NP si-LK km-KH lo-LA my-MM mn-MN kk-KZ uz-UZ az-AZ ka-GE hy-AM eu-ES ca-ES gl-ES cy-GB ga-IE sq-AL mk-MK bs-BA`.split(' ');
+  const languageLabels = (() => {
+    const candidates = [...new Set([...originalLanguages, ...applied.languages,
+      ...languageCodes, ...regionalLocales])];
+    const supported = page.Intl.DateTimeFormat.supportedLocalesOf(candidates);
+    const display = typeof page.Intl.DisplayNames === 'function'
+      ? new page.Intl.DisplayNames(['en'], { type: 'language' }) : null;
+    return supported.map(code => ({
+      code,
+      label: display ? `${display.of(code)} (${code})` : code,
+    })).sort((a, b) => a.label.localeCompare(b.label, 'en'));
+  })();
+  const zones = (() => {
+    let list = [];
+    try { list = page.Intl.supportedValuesOf?.('timeZone') || []; } catch {}
+    if (!list.length) list = fallbackZones;
+    return [...new Set(['UTC', ...list, ...(zone !== SYSTEM ? [zone] : [])])].sort();
+  })();
+
+  let showPanel = null;
   if (typeof GM_registerMenuCommand === 'function') {
-    GM_registerMenuCommand(`Choose time zone (${zone === SYSTEM ? 'System' : zone})`, () => {
-      if (openPicker) return openPicker();
-      if (page.top === page && document.body) {
-        createWidget();
-        if (openPicker) openPicker();
-      } else if (page.top === page) {
-        document.addEventListener('DOMContentLoaded', () => {
-          createWidget();
-          if (openPicker) openPicker();
-        }, { once: true });
-      }
+    GM_registerMenuCommand('Open Environment Manager', () => {
+      if (showPanel) { showPanel(); return; }
+      if (page.top !== page) return;
+      if (document.body) { createWidget(); showPanel?.(); }
+      else document.addEventListener('DOMContentLoaded', () => { createWidget(); showPanel?.(); }, { once: true });
     });
   }
 
   function createWidget() {
-    if (page.top !== page || !document.body || document.getElementById('ca-tz-host')) return;
+    if (page.top !== page || !document.body || document.getElementById('ca-env-manager-host')) return;
     const host = document.createElement('div');
-    host.id = 'ca-tz-host';
-    host.style.cssText = 'position:fixed;top:12px;left:12px;z-index:2147483647;pointer-events:none';
+    host.id = 'ca-env-manager-host';
+    host.style.cssText = 'position:fixed;top:12px;left:12px;z-index:2147483647;pointer-events:none;width:0;height:0;';
     const shadow = host.attachShadow({ mode: 'closed' });
     shadow.innerHTML = `
       <style>
-        :host { color-scheme:light dark; }
-        * { box-sizing:border-box; }
-        .fab { appearance:none;background:#242b39;color:#fff;border:1px solid #65738a;
-          border-radius:12px;padding:9px 12px;font:600 13px system-ui,sans-serif;cursor:grab;
-          touch-action:none;user-select:none;-webkit-user-select:none;
-          box-shadow:0 4px 14px #0004; }
-        .fab:active { cursor:grabbing; }
-        .panel { position:fixed;width:min(370px,calc(100vw - 28px));
-          max-height:min(74vh,620px);overflow:auto;overscroll-behavior:contain;
-          margin:0;padding:16px;border:1px solid #d6dae4;border-radius:15px;
-          background:#fff;color:#171f2e;box-shadow:0 12px 40px #0005;font:14px system-ui,sans-serif; }
-        .header { display:flex;justify-content:space-between;align-items:center;gap:10px; }
-        .title { font-size:16px;font-weight:750; }
-        .caption { font-size:12px;color:#586478;margin-top:5px;overflow-wrap:anywhere; }
-        .selected { padding:9px 10px;margin-top:12px;border-radius:8px;background:#eef3fd;
-          font-size:13px;overflow-wrap:anywhere; }
-        .selected strong { display:block;margin-top:3px; }
-        label { display:block;margin-top:14px;margin-bottom:6px;font-size:12px;font-weight:700; }
-        input { width:100%;height:40px;border:1px solid #abb8ca;border-radius:8px;
-          padding:9px 10px;background:white;color:#182334;font:13px system-ui,sans-serif; }
-        input:focus { outline:2px solid #4d76d6;outline-offset:1px; }
-        .list { border:1px solid #d5dce9;border-radius:8px;margin-top:6px;
-          max-height:216px;overflow-y:auto;overscroll-behavior:contain; }
-        .item { display:block;width:100%;border:0;border-bottom:1px solid #edf0f5;
-          border-radius:0;background:transparent;color:#1a273a;text-align:left;
-          padding:8px 10px;font:13px system-ui,sans-serif;cursor:pointer; }
-        .item:hover,.item:focus { background:#eef4ff;outline:none; }
-        .item.active { background:#e4edfc;font-weight:700; }
-        .count,.error { font-size:12px;margin-top:7px; }
-        .count { color:#637087; }
-        .error { color:#b42318; }
-        .actions { display:flex;gap:8px;margin-top:12px; }
-        .action { appearance:none;flex:1;border-radius:9px;border:1px solid #aeb9c9;
-          background:#fff;color:#213047;padding:10px 8px;font:600 13px system-ui,sans-serif;cursor:pointer; }
-        .primary { border-color:#385ed0;background:#385ed0;color:#fff; }
-        .system { width:100%;text-align:center;margin-top:9px; }
-        .tip { margin-top:12px;color:#637087;font-size:11px;line-height:1.5; }
-        [hidden] { display:none !important; }
+        :host { all:initial;color-scheme:light dark; }
+        *, *::before, *::after {box-sizing:border-box;}
+        .fab {pointer-events:auto;display:block;position:absolute;top:0;left:0;border:1px solid #536b88;
+          border-radius:999px;min-width:72px;min-height:38px;padding:7px 11px;
+          color:#fff;background:#263e61;box-shadow:0 4px 15px #0004;
+          font:700 13px system-ui,Arial,sans-serif;cursor:grab;touch-action:none;
+          user-select:none;-webkit-user-select:none;white-space:nowrap;}
+        .fab:active {cursor:grabbing;}
+        .fab.leak {background:#af1e29;border-color:#ee8790;animation:warn-pulse 1.8s ease-in-out infinite;}
+        .fab.unknown {background:#98610f;border-color:#e8b45b;}
+        .fab.off {background:#515861;border-color:#767e87;}
+        @keyframes warn-pulse {50% {box-shadow:0 0 0 5px #d32f2f50;}}
+        .panel {pointer-events:auto;position:fixed;width:min(390px,calc(100vw - 24px));
+          max-height:min(80vh,650px);overflow-y:auto;overscroll-behavior:contain;
+          padding:16px;border-radius:15px;border:1px solid #d6dde8;background:#fff;color:#202b39;
+          box-shadow:0 14px 48px #0005;font:13px/1.45 system-ui,Arial,sans-serif;}
+        .head,.setting,.actionrow,.inputrow,.chip {display:flex;align-items:center;gap:8px;}
+        .head,.setting {justify-content:space-between;}
+        .head strong {font-size:16px;}
+        .muted {color:#64748b;font-size:11px;line-height:1.5;}
+        .section {padding:12px 0;border-bottom:1px solid #e6eaf0;}
+        .section:last-of-type {border:0;}
+        .label {font-size:13px;font-weight:700;}
+        .sub {margin:5px 0 8px;color:#657286;font-size:11px;line-height:1.5;overflow-wrap:anywhere;}
+        input[type=text],input[type=search] {min-width:0;flex:1;width:100%;height:36px;border-radius:8px;
+          border:1px solid #9aa8bd;background:white;color:#1d293a;padding:8px 9px;font:12px system-ui,sans-serif;}
+        input:focus, button:focus-visible {outline:2px solid #4576ce;outline-offset:1px;}
+        input[type=checkbox] {width:19px;height:19px;flex:0 0 19px;accent-color:#416fd4;cursor:pointer;}
+        button {cursor:pointer;border-radius:8px;border:1px solid #bac5d3;background:#f7f9fc;
+          color:#26364e;padding:8px 10px;font:600 12px system-ui,sans-serif;}
+        .primary {background:#385fd0;color:#fff;border-color:#385fd0;}
+        .tiny {font-size:11px;padding:5px 8px;}
+        .list {border:1px solid #d7dfe9;border-radius:8px;margin-top:5px;max-height:145px;
+          overflow:auto;overscroll-behavior:contain;}
+        .option {display:block;width:100%;text-align:left;border:0;border-radius:0;
+          border-bottom:1px solid #eff2f7;background:transparent;font-weight:500;padding:7px 9px;
+          white-space:normal;overflow-wrap:anywhere;}
+        .option:hover,.option:focus {background:#e7efff;}
+        .chips {display:flex;flex-direction:column;gap:4px;margin:8px 0;max-height:130px;overflow:auto;}
+        .chip {justify-content:space-between;border-radius:7px;background:#f1f4f8;padding:4px 6px;}
+        .chip span {flex:1;overflow-wrap:anywhere;}
+        .status {margin-top:11px;padding:9px;border-radius:9px;background:#f0f4f9;
+          color:#32435d;font-size:12px;overflow-wrap:anywhere;}
+        .status.ok {background:#eaf7ef;color:#17613c;}
+        .status.warning {background:#fff2d7;color:#78520e;}
+        .status.leak,.status.error {background:#fce8e9;color:#a22127;}
+        .count {padding:4px;color:#69788c;font-size:11px;}
+        [hidden] {display:none!important;}
         @media (prefers-color-scheme:dark) {
-          .panel { background:#19212e;color:#f2f4f8;border-color:#3c485c; }
-          .caption,.count,.tip { color:#a8b5ca; }
-          .selected { background:#2d3a4e; }
-          input { background:#232f40;color:#f2f4f8;border-color:#627088; }
-          .list { border-color:#455369; }
-          .item { color:#f2f4f8;border-bottom-color:#364356; }
-          .item:hover,.item:focus,.item.active { background:#354665; }
-          .action { background:#28364a;color:#f1f4f9;border-color:#60718b; }
-          .primary { background:#385ed0;border-color:#385ed0;color:#fff; }
-          .error { color:#ff9b91; }
+          .panel {background:#17212e;color:#eef2f7;border-color:#39495e;}
+          .section {border-color:#34465a;}
+          .muted,.sub,.count {color:#acbdd2;}
+          input[type=text],input[type=search] {background:#222f41;color:#fff;border-color:#697b92;}
+          button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
+          .primary {background:#385fd0;border-color:#385fd0;color:white;}
+          .chip {background:#293b4e;}
+          .option {border-color:#35485f;}
+          .option:hover,.option:focus {background:#354c70;}
+          .status {background:#28394c;color:#d3e2f5;}
+          .status.ok {background:#164a34;color:#b5f3d0;}
+          .status.warning {background:#564018;color:#ffe3a1;}
+          .status.leak,.status.error {background:#591f28;color:#ffc2c8;}
         }
       </style>
-      <section id="panel" class="panel" role="dialog" aria-label="Time zone switcher" hidden>
-        <div class="header"><span class="title">Time zone switcher</span>
-          <button id="closeX" class="action" type="button" style="flex:0 0 auto;padding:5px 10px" aria-label="Close">✕</button>
+      <button id="fab" class="fab" type="button" aria-label="Environment Manager; drag to move">TZ ⚙</button>
+      <section id="panel" class="panel" role="dialog" aria-label="Environment Manager" hidden>
+        <div class="head"><strong>Environment Settings</strong><button id="close" class="tiny" type="button" aria-label="Close">✕</button></div>
+        <div class="muted">One persistent configuration across Claude and Anthropic sites. Drag the floating button to reposition it.</div>
+        <div class="section">
+          <div class="label">Timezone</div>
+          <div class="sub" id="tzNow"></div>
+          <div class="inputrow"><input id="tzInput" type="search" autocomplete="off" spellcheck="false" placeholder="Search or enter an IANA timezone"><button class="primary" id="tzSave" type="button">Save</button></div>
+          <div class="list" id="tzOptions"></div><div class="count" id="tzCount"></div>
+          <button id="tzSystem" class="tiny" type="button">Use system timezone</button>
         </div>
-        <div class="caption">One setting for Claude and Anthropic websites. Automatically handles daylight saving time.</div>
-        <div class="selected">Current setting:<strong id="current"></strong></div>
-        <label for="search">Search or enter any IANA time zone</label>
-        <input id="search" type="search" autocomplete="off" spellcheck="false"
-          placeholder="e.g. America/Phoenix" aria-label="Search time zones" />
-        <div id="list" class="list" role="listbox" aria-label="Available time zones"></div>
-        <div id="count" class="count"></div>
-        <div id="error" class="error" role="alert" hidden></div>
-        <div class="actions">
-          <button id="cancel" class="action" type="button">Cancel</button>
-          <button id="save" class="action primary" type="button">Save &amp; reload</button>
+        <div class="section">
+          <div class="setting"><span class="label">Browser Languages</span><input id="languageOn" type="checkbox" aria-label="Enable browser language override"></div>
+          <div class="sub">Currently reported by the browser: <span id="originalLanguages"></span>. Customize the order; the first is navigator.language.</div>
+          <div id="languageEditor">
+            <div class="chips" id="chips"></div>
+            <div class="inputrow"><input id="languageInput" type="search" autocomplete="off" spellcheck="false" placeholder="Find or enter any BCP-47 language"><button id="languageAdd" type="button">Add</button></div>
+            <div id="languageOptions" class="list"></div><div id="languageCount" class="count"></div>
+            <button id="languageSave" class="primary" type="button">Save language order</button>
+          </div>
+          <div class="sub">HTTP Accept-Language headers are controlled by the browser, not this script.</div>
         </div>
-        <button id="system" class="action system" type="button">Use system time zone</button>
-        <div class="tip">Search the complete list, or type a valid IANA alias not shown in it. Press Enter to save your typed time zone. JavaScript time zone only; it does not change your IP, device settings, or server-side account region.</div>
+        <div class="section">
+          <div class="setting"><span class="label">Intl Locale</span><input id="localeOn" type="checkbox" aria-label="Enable Intl locale override"></div>
+          <div class="sub">Browser default: <span id="nativeLocale"></span>. Use any valid BCP-47 locale.</div>
+          <div class="inputrow"><input id="localeInput" type="text" spellcheck="false" placeholder="e.g. en-US"><button id="localeSave" class="primary" type="button">Save</button></div>
+        </div>
+        <div class="section">
+          <div class="setting"><span class="label">Chinese Font Protection</span><input id="fontOn" type="checkbox" aria-label="Enable Chinese font masking"></div>
+          <div class="sub">Enabled by default. Masks ${fontFamilies.length} common font-family names in supported detection APIs without removing fonts from text rendering. Some fingerprinting methods cannot be masked.</div>
+        </div>
+        <div class="section">
+          <div class="setting"><span class="label">Automatic WebRTC Leak Check</span><input id="rtcOn" type="checkbox" aria-label="Enable automatic WebRTC leak check"></div>
+          <div class="sub">Checks on every visit using external STUN servers and api.ipify.org. The button turns red on an observed leak. Checks do not block WebRTC traffic.</div>
+          <div class="status" id="rtcStatus"></div>
+          <button id="rtcRetry" class="tiny" type="button">Check again</button>
+        </div>
+        <div class="status" id="message" aria-live="polite" hidden></div>
+        <div class="actionrow" style="margin-top:12px;justify-content:flex-end"><button id="reset" type="button">Reset to defaults</button></div>
       </section>
-      <button id="toggle" class="fab" type="button" title="Click to choose time zone; drag to move" aria-label="Time zone switcher (drag to move)">🕒 TZ</button>
     `;
-    const $ = id => shadow.getElementById(id);
-    const list = $('list');
-    const search = $('search');
-    const allZones = getSupportedZones();
-    let selected = zone;
-    const maxVisible = 120;
-    const toggle = $('toggle');
+    const $ = name => shadow.getElementById(name);
+    const fab = $('fab');
     const panel = $('panel');
     const EDGE = 12;
-
-    // Save relative coordinates so the button stays visible when the viewport changes.
-    function validPosition(value) {
-      return value && typeof value === 'object' &&
-        Number.isFinite(value.x) && Number.isFinite(value.y) &&
-        value.x >= 0 && value.x <= 1 && value.y >= 0 && value.y <= 1;
+    const bound = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+    const savedPosition = GM_getValue(POSITION_KEY, null);
+    function validPosition(v) {
+      return v && Number.isFinite(v.x) && Number.isFinite(v.y) && v.x >= 0 && v.x <= 1 && v.y >= 0 && v.y <= 1;
     }
-    let savedPosition = GM_getValue(POSITION_KEY, null);
     let position = validPosition(savedPosition) ? { x: savedPosition.x, y: savedPosition.y } : { x: 0, y: 1 };
-
-    function placementBounds() {
+    function bounds() {
       const width = document.documentElement.clientWidth || page.innerWidth;
       const height = page.innerHeight || document.documentElement.clientHeight;
-      return {
-        width,
-        height,
-        maxLeft: Math.max(EDGE, width - EDGE - toggle.offsetWidth),
-        maxTop: Math.max(EDGE, height - EDGE - toggle.offsetHeight),
-      };
+      return { width, height,
+        maxLeft: Math.max(EDGE, width - EDGE - fab.offsetWidth),
+        maxTop: Math.max(EDGE, height - EDGE - fab.offsetHeight) };
     }
-
-    function clamp(value, min, max) {
-      return Math.max(min, Math.min(value, max));
-    }
-
-    function applyPosition() {
-      const bounds = placementBounds();
-      host.style.left = `${EDGE + position.x * (bounds.maxLeft - EDGE)}px`;
-      host.style.top = `${EDGE + position.y * (bounds.maxTop - EDGE)}px`;
-      layoutPanel();
-    }
-
-    // Open the panel above or below the dragged button, staying within the viewport.
-    function layoutPanel() {
+    function layout() {
       if (panel.hidden) return;
-      const { width, height } = placementBounds();
-      const buttonRect = toggle.getBoundingClientRect();
-      const above = Math.max(0, buttonRect.top - EDGE - 8);
-      const below = Math.max(0, height - buttonRect.bottom - EDGE - 8);
-      const showBelow = below >= above;
-      const available = showBelow ? below : above;
-      panel.style.maxHeight = `${Math.max(1, Math.min(620, Math.floor(height * 0.74), Math.floor(available)))}px`;
-      panel.style.left = `${clamp(buttonRect.left, EDGE, Math.max(EDGE, width - EDGE - panel.offsetWidth))}px`;
-      const actualHeight = panel.getBoundingClientRect().height;
-      panel.style.top = `${clamp(showBelow ? buttonRect.bottom + 8 : buttonRect.top - 8 - actualHeight,
-        EDGE, Math.max(EDGE, height - EDGE - actualHeight))}px`;
+      const b = bounds();
+      const rect = fab.getBoundingClientRect();
+      const availableTop = Math.max(0, rect.top - EDGE - 8);
+      const availableBottom = Math.max(0, b.height - rect.bottom - EDGE - 8);
+      const showBelow = availableBottom >= availableTop;
+      const available = showBelow ? availableBottom : availableTop;
+      panel.style.maxHeight = `${Math.max(50, Math.min(650, b.height * .80, available))}px`;
+      panel.style.left = `${bound(rect.left, EDGE, Math.max(EDGE, b.width - EDGE - panel.offsetWidth))}px`;
+      const h = panel.getBoundingClientRect().height;
+      panel.style.top = `${bound(showBelow ? rect.bottom + 8 : rect.top - 8 - h,
+        EDGE, Math.max(EDGE, b.height - EDGE - h))}px`;
     }
-
+    function applyPosition() {
+      const b = bounds();
+      host.style.left = `${EDGE + position.x * (b.maxLeft - EDGE)}px`;
+      host.style.top = `${EDGE + position.y * (b.maxTop - EDGE)}px`;
+      layout();
+    }
     let drag = null;
     let lastDragEnded = -Infinity;
-    toggle.addEventListener('pointerdown', event => {
-      if (event.button !== 0 || !event.isPrimary) return;
-      drag = {
-        id: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        left: parseFloat(host.style.left),
-        top: parseFloat(host.style.top),
-        moved: false,
-      };
-      toggle.setPointerCapture(event.pointerId);
+    fab.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || !e.isPrimary) return;
+      drag = { id:e.pointerId, x:e.clientX, y:e.clientY,
+        left:parseFloat(host.style.left), top:parseFloat(host.style.top), moved:false };
+      fab.setPointerCapture(e.pointerId);
     });
-    toggle.addEventListener('pointermove', event => {
-      if (!drag || event.pointerId !== drag.id) return;
-      const dx = event.clientX - drag.startX;
-      const dy = event.clientY - drag.startY;
+    fab.addEventListener('pointermove', e => {
+      if (!drag || drag.id !== e.pointerId) return;
+      const dx = e.clientX - drag.x;
+      const dy = e.clientY - drag.y;
       if (!drag.moved && Math.hypot(dx, dy) < 5) return;
       drag.moved = true;
-      event.preventDefault();
-      const bounds = placementBounds();
-      const left = clamp(drag.left + dx, EDGE, bounds.maxLeft);
-      const top = clamp(drag.top + dy, EDGE, bounds.maxTop);
+      e.preventDefault();
+      const b = bounds();
+      const left = bound(drag.left + dx, EDGE, b.maxLeft);
+      const top = bound(drag.top + dy, EDGE, b.maxTop);
       host.style.left = `${left}px`;
       host.style.top = `${top}px`;
       position = {
-        x: bounds.maxLeft === EDGE ? 0 : (left - EDGE) / (bounds.maxLeft - EDGE),
-        y: bounds.maxTop === EDGE ? 0 : (top - EDGE) / (bounds.maxTop - EDGE),
+        x: b.maxLeft === EDGE ? 0 : (left - EDGE) / (b.maxLeft - EDGE),
+        y: b.maxTop === EDGE ? 0 : (top - EDGE) / (b.maxTop - EDGE),
       };
-      layoutPanel();
+      layout();
     });
-    function finishDrag(event) {
-      if (!drag || event.pointerId !== drag.id) return;
+    function finishDrag(e) {
+      if (!drag || drag.id !== e.pointerId) return;
       if (drag.moved) {
         lastDragEnded = performance.now();
-        GM_setValue(POSITION_KEY, { x: position.x, y: position.y });
+        GM_setValue(POSITION_KEY, { ...position });
       }
-      if (toggle.hasPointerCapture(event.pointerId)) toggle.releasePointerCapture(event.pointerId);
+      if (fab.hasPointerCapture(e.pointerId)) fab.releasePointerCapture(e.pointerId);
       drag = null;
     }
-    toggle.addEventListener('pointerup', finishDrag);
-    toggle.addEventListener('pointercancel', finishDrag);
-    page.addEventListener('resize', applyPosition, { passive: true });
-
+    fab.addEventListener('pointerup', finishDrag);
+    fab.addEventListener('pointercancel', finishDrag);
+    page.addEventListener('resize', applyPosition, { passive:true });
     if (typeof GM_addValueChangeListener === 'function') {
-      GM_addValueChangeListener(POSITION_KEY, (_name, _old, value, remote) => {
-        if (!remote || !validPosition(value) || drag) return;
-        position = { x: value.x, y: value.y };
-        applyPosition();
+      GM_addValueChangeListener(POSITION_KEY, (_key,_old,val,remote) => {
+        if (!remote || !validPosition(val) || drag) return;
+        position = { x:val.x,y:val.y }; applyPosition();
       });
     }
 
-    const currentLabel = x => x === SYSTEM ? `System (${systemZone})` : x;
-    function showStatus() {
-      $('current').textContent = currentLabel(selected);
+    function message(info, isError = false) {
+      $('message').hidden = false;
+      $('message').className = `status ${isError ? 'error' : 'ok'}`;
+      $('message').textContent = info;
+      layout();
     }
-    function error(message, isError = false) {
-      $('error').hidden = !isError;
-      $('error').textContent = isError ? message : '';
+    function setting(key, value, reload) {
+      const result = commit(key, value, reload);
+      message(result.info, !result.ok);
+      syncControls();
+      return result.ok;
     }
-    function renderResults() {
-      const q = search.value.trim().toLowerCase().replaceAll(' ', '_');
-      const found = q ? allZones.filter(z => z.toLowerCase().includes(q)) : allZones;
-      const fragment = document.createDocumentFragment();
-      for (const value of found.slice(0, maxVisible)) {
-        const item = document.createElement('button');
-        item.type = 'button';
-        item.className = 'item' + (value === selected ? ' active' : '');
-        item.setAttribute('role', 'option');
-        item.setAttribute('aria-selected', String(value === selected));
-        item.textContent = value;
-        item.addEventListener('click', () => {
-          selected = value;
-          search.value = value;
-          showStatus();
-          error('');
-          renderResults();
-        });
-        fragment.appendChild(item);
+    function renderRtc() {
+      let label = '';
+      switch (rtcState.state) {
+        case 'leak': label = '⚠ TZ !'; break;
+        case 'unknown': label = 'TZ ?'; break;
+        case 'checking': label = 'TZ …'; break;
+        case 'off': label = 'TZ ⚙'; break;
+        default: label = 'TZ ✓';
       }
-      list.replaceChildren(fragment);
-      $('count').textContent = found.length === 0
-        ? 'No exact list match. You can still enter any valid IANA alias.'
-        : `Showing ${Math.min(found.length, maxVisible)} of ${found.length} matching time zones`;
+      fab.textContent = label;
+      fab.className = `fab ${rtcState.state === 'leak' ? 'leak' : rtcState.state === 'unknown' ? 'unknown' : rtcState.state === 'off' ? 'off' : ''}`;
+      $('rtcStatus').className = `status ${rtcState.state === 'leak' ? 'leak' : rtcState.state === 'safe' ? 'ok' : rtcState.state === 'off' ? '' : 'warning'}`;
+      $('rtcStatus').textContent = `${rtcState.state.toUpperCase()}: ${rtcState.details}`;
     }
-    function applySelection() {
-      const typed = search.value.trim();
-      // Blank search means keep the current selection.
-      saveZone(typed || selected, error);
+    subscribers.add(renderRtc);
+    function syncControls() {
+      $('tzNow').textContent = `Saved: ${prefs.timezone === SYSTEM ? `System (${systemZone})` : prefs.timezone}`;
+      $('languageOn').checked = prefs.languageEnabled;
+      $('localeOn').checked = prefs.localeEnabled;
+      $('fontOn').checked = prefs.fonts;
+      $('rtcOn').checked = prefs.rtc;
+      $('languageEditor').hidden = !prefs.languageEnabled;
+      renderRtc();
     }
-    openPicker = () => {
-      selected = zone;
-      search.value = '';
-      showStatus();
-      error('');
-      renderResults();
+    $('originalLanguages').textContent = originalLanguages.join(', ');
+    $('nativeLocale').textContent = originalLocale;
+
+    function showOptions(root, found, field, countId, max = 90) {
+      const fragment = document.createDocumentFragment();
+      for (const item of found.slice(0,max)) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'option';
+        btn.textContent = item.label || item.code;
+        btn.addEventListener('click', () => {
+          $(field).value = item.code;
+          $(root).hidden = true;
+        });
+        fragment.appendChild(btn);
+      }
+      $(root).replaceChildren(fragment);
+      $(countId).textContent = `Showing ${Math.min(max,found.length)} / ${found.length}`;
+      $(root).hidden = found.length === 0;
+      layout();
+    }
+    $('tzInput').value = prefs.timezone === SYSTEM ? '' : prefs.timezone;
+    function tzResults() {
+      const q = $('tzInput').value.toLowerCase().trim().replaceAll(' ', '_');
+      const found = zones.filter(z => z.toLowerCase().includes(q)).map(z => ({ code:z, label:z }));
+      showOptions('tzOptions',found,'tzInput','tzCount');
+    }
+    $('tzInput').addEventListener('input', tzResults);
+    $('tzSave').addEventListener('click', () => {
+      const valid = validZone($('tzInput').value);
+      if (!valid) return message('Invalid IANA timezone. Example: America/New_York.',true);
+      setting('timezone',valid,true);
+    });
+    $('tzSystem').addEventListener('click', () => {
+      $('tzInput').value = '';
+      setting('timezone',SYSTEM,true);
+    });
+
+    let languageDraft = [...prefs.languages];
+    function renderChips() {
+      const fragment = document.createDocumentFragment();
+      languageDraft.forEach((code,index) => {
+        const chip = document.createElement('div');
+        chip.className = 'chip';
+        const label = document.createElement('span');
+        label.textContent = code;
+        chip.appendChild(label);
+        for (const [txt,delta] of [['↑',-1],['↓',1]]) {
+          const btn = document.createElement('button');
+          btn.type = 'button'; btn.className = 'tiny'; btn.textContent = txt;
+          btn.disabled = index + delta < 0 || index + delta >= languageDraft.length;
+          btn.addEventListener('click', () => {
+            const other = index + delta;
+            [languageDraft[index],languageDraft[other]] = [languageDraft[other],languageDraft[index]];
+            renderChips();
+          });
+          chip.appendChild(btn);
+        }
+        const remove = document.createElement('button');
+        remove.type = 'button'; remove.className = 'tiny'; remove.textContent = '×';
+        remove.disabled = languageDraft.length < 2;
+        remove.addEventListener('click', () => {
+          languageDraft.splice(index,1);
+          renderChips();
+        });
+        chip.appendChild(remove);
+        fragment.appendChild(chip);
+      });
+      $('chips').replaceChildren(fragment);
+      layout();
+    }
+    function langResults() {
+      const q = $('languageInput').value.toLowerCase().trim();
+      const found = languageLabels.filter(x => x.label.toLowerCase().includes(q) || x.code.toLowerCase().includes(q));
+      showOptions('languageOptions',found,'languageInput','languageCount');
+    }
+    $('languageInput').addEventListener('input', langResults);
+    function addLanguage() {
+      const code = validLanguage($('languageInput').value);
+      if (!code) return message('Invalid BCP-47 language tag.',true);
+      if (!languageDraft.includes(code)) languageDraft.push(code);
+      $('languageInput').value = '';
+      renderChips(); langResults();
+    }
+    $('languageAdd').addEventListener('click',addLanguage);
+    $('languageSave').addEventListener('click', () => {
+      const valid = validLanguages(languageDraft);
+      if (!valid) return message('Add at least one valid language.',true);
+      setting('languages',valid,true);
+    });
+    $('languageOn').addEventListener('change', e => {
+      setting('languageEnabled',e.target.checked,true);
+    });
+    $('localeInput').value = prefs.locale;
+    $('localeOn').addEventListener('change', e => {
+      setting('localeEnabled',e.target.checked,true);
+    });
+    $('localeSave').addEventListener('click', () => {
+      const v = validLanguage($('localeInput').value);
+      if (!v) return message('Invalid BCP-47 locale.',true);
+      setting('locale',v,true);
+    });
+    $('fontOn').addEventListener('change',e => setting('fonts',e.target.checked,false));
+    $('rtcOn').addEventListener('change',e => {
+      if (setting('rtc',e.target.checked,false)) runRtcCheck();
+    });
+    $('rtcRetry').addEventListener('click', () => {
+      if (!prefs.rtc) return message('Enable automatic WebRTC checks first.',true);
+      runRtcCheck();
+    });
+    $('reset').addEventListener('click', () => {
+      if (!page.confirm('Restore default settings? Your floating button position will be kept.')) return;
+      const next = {...defaultConfig, languages:[...originalLanguages], locale:originalLocale};
+      const reloadKeys = ['timezone','languageEnabled','languages','localeEnabled','locale'];
+      const queued = { before:{}, keys:[] };
+      for (const key of reloadKeys) {
+        if (JSON.stringify(prefs[key]) !== JSON.stringify(next[key])) {
+          queued.before[key] = structuredCloneSafe(prefs[key]); queued.keys.push(key);
+        }
+      }
+      prefs = structuredCloneSafe(next);
+      applied.fonts = prefs.fonts;
+      applied.rtc = prefs.rtc;
+      if (!verifySync('fonts')) { prefs.fonts = false; applied.fonts = false; }
+      if (!verifySync('rtc')) { prefs.rtc = false; applied.rtc = false; }
+      persist();
+      GM_setValue(PENDING_KEY, queued.keys.length ? queued : null);
+      languageDraft = [...prefs.languages];
+      $('localeInput').value = prefs.locale;
+      $('tzInput').value = '';
+      renderChips();
+      syncControls();
+      runRtcCheck();
+      if (queued.keys.length && page.confirm('Defaults saved. Reload now to apply and verify them?')) {
+        page.location.reload();
+      } else {
+        message('Defaults saved. A manual reload may be needed to apply all changes.');
+      }
+    });
+
+    showPanel = () => {
+      languageDraft = [...prefs.languages];
+      renderChips();
       panel.hidden = false;
-      layoutPanel();
-      search.focus();
+      syncControls(); tzResults(); langResults(); layout();
     };
-    toggle.addEventListener('click', () => {
-      // Dragging must never accidentally open or close the panel.
+    fab.addEventListener('click', () => {
       if (performance.now() - lastDragEnded < 400) return;
-      if (panel.hidden) openPicker();
+      if (panel.hidden) showPanel();
       else panel.hidden = true;
     });
-    $('closeX').addEventListener('click', () => { $('panel').hidden = true; });
-    $('cancel').addEventListener('click', () => { $('panel').hidden = true; });
-    $('system').addEventListener('click', () => saveZone(SYSTEM, error));
-    $('save').addEventListener('click', applySelection);
-    search.addEventListener('input', () => { error(''); renderResults(); });
-    search.addEventListener('keydown', event => {
-      if (event.key === 'Enter') { event.preventDefault(); applySelection(); }
-      if (event.key === 'Escape') { event.preventDefault(); $('panel').hidden = true; }
-    });
-    host.style.pointerEvents = 'auto';
+    $('close').addEventListener('click', () => { panel.hidden = true; });
+    page.addEventListener('keydown',e => { if (e.key === 'Escape' && !panel.hidden) panel.hidden = true; });
     document.body.appendChild(host);
     applyPosition();
+    syncControls();
+    if (restoredMessage) message(restoredMessage, /failed|could not|unavailable/i.test(restoredMessage));
+    // Keep the floating button on screen if a SPA replaces the document body.
+    const observer = new MutationObserver(() => {
+      if (document.body && !host.isConnected) {
+        document.body.appendChild(host);
+        applyPosition();
+      }
+    });
+    observer.observe(document.documentElement,{ childList:true });
   }
-
   if (page.top === page) {
     if (document.body) createWidget();
-    else document.addEventListener('DOMContentLoaded', createWidget, { once: true });
+    else document.addEventListener('DOMContentLoaded',createWidget,{once:true});
   }
+  if (applied.rtc) runRtcCheck();
+  else updateRtc('off','Automatic checking is disabled.');
 })();
