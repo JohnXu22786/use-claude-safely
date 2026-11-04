@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Claude / Anthropic 全站时区切换（持久记忆）
-// @namespace    https://local.userscripts/claude-timezone
-// @description  为 Claude/Anthropic 网站指定 IANA 时区，覆盖 Intl 和常见 Date 接口，并跨域持久保存。
+// @name         Claude / Anthropic - Global Time Zone Switcher
+// @namespace    https://userscripts.local/claude-anthropic-timezone
+// @description  Override the browser-reported time zone on Claude and Anthropic websites. Search all supported IANA zones, enter a custom ID, and remember one setting across domains.
 // @match        https://claude.ai/*
 // @match        https://*.claude.ai/*
 // @match        https://claude.com/*
@@ -11,8 +11,8 @@
 // @match        https://claudeusercontent.com/*
 // @match        https://*.claudeusercontent.com/*
 // @run-at       document-start
-// @noframes
 // @sandbox      raw
+// @grant        unsafeWindow
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -22,27 +22,20 @@
 (() => {
   'use strict';
 
+  const page = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const KEY = 'preferredIanaTimezone';
   const SYSTEM = 'system';
-  const NativeDate = Date;
-  const NativeDTF = Intl.DateTimeFormat;
-  const choices = [
-    ['system', '跟随设备系统'],
-    ['UTC', 'UTC（世界协调时间）'],
-    ['Asia/Shanghai', '中国标准时间 · 北京 / 上海'],
-    ['Asia/Tokyo', '日本标准时间 · 东京'],
-    ['Asia/Singapore', '新加坡'],
-    ['America/New_York', '美国东部 · 纽约（自动夏令时）'],
-    ['America/Chicago', '美国中部 · 芝加哥（自动夏令时）'],
-    ['America/Los_Angeles', '美国西部 · 洛杉矶（自动夏令时）'],
-    ['Europe/London', '英国 · 伦敦（自动夏令时）'],
-    ['Europe/Berlin', '欧洲中部 · 柏林（自动夏令时）'],
-  ];
+  const NativeDate = page.Date;
+  const NativeDTF = page.Intl.DateTimeFormat;
+  const systemZone = new NativeDTF('en-US').resolvedOptions().timeZone || 'UTC';
 
-  function validateZone(value) {
-    if (value === SYSTEM) return SYSTEM;
+  function validateZone(raw) {
+    if (typeof raw !== 'string') return null;
+    const name = raw.trim();
+    if (name.toLowerCase() === SYSTEM) return SYSTEM;
+    if (!name) return null;
     try {
-      return new NativeDTF('en-US', { timeZone: value }).resolvedOptions().timeZone;
+      return new NativeDTF('en-US', { timeZone: name }).resolvedOptions().timeZone;
     } catch {
       return null;
     }
@@ -51,19 +44,17 @@
   const saved = GM_getValue(KEY, SYSTEM);
   const zone = validateZone(saved) || SYSTEM;
 
-  function saveZone(newZone) {
-    const valid = validateZone(newZone.trim());
+  function saveZone(input, message) {
+    const valid = validateZone(input);
     if (!valid) {
-      alert('时区无效。请填写 IANA 名称，例如 Asia/Shanghai、America/New_York。');
+      if (message) message('Invalid time zone. Enter a valid IANA identifier, such as America/Phoenix.', true);
       return false;
     }
-    GM_setValue(KEY, valid);
-    location.reload();
+    if (valid !== zone) GM_setValue(KEY, valid);
+    page.location.reload();
     return true;
   }
 
-  // -------- 早期覆盖页面常用 JS 时区接口 --------
-  // 不修改实际 Unix 时间戳、Date.now()、UTC、网络请求或系统设置。
   if (zone !== SYSTEM) {
     const dtfParts = new NativeDTF('en-US-u-ca-gregory-nu-latn', {
       timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
@@ -77,7 +68,7 @@
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-    // 构建“字段被视作 UTC 时”的时间戳，规避 Date.UTC 对年份 0~99 的特判。
+    // Convert wall-clock fields to a UTC-like timestamp, including years 0-99.
     function utcFromFields(p) {
       const d = new NativeDate(0);
       d.setUTCFullYear(p.y, p.mo - 1, p.d);
@@ -99,7 +90,7 @@
           h: obj.hour, mi: obj.minute, s: obj.second,
         };
         p.asUtc = utcFromFields({ ...p, ms: 0 });
-        p.offset = (sec * 1000 - p.asUtc) / 60000; // 与 getTimezoneOffset 同号
+        p.offset = (sec * 1000 - p.asUtc) / 60000; // Same sign as getTimezoneOffset
         cache.set(sec, p);
         if (cache.size > 32) cache.delete(cache.keys().next().value);
       }
@@ -111,7 +102,7 @@
         a.h === b.h && a.mi === b.mi && a.s === b.s && a.ms === b.ms;
     }
 
-    // 本地墙上时间 -> 真实时间戳。处理 DST：重叠时取较早一次，空缺时顺延。
+    // Resolve local clock fields to an instant, including DST gaps and overlaps.
     function epochFromLocal(local) {
       const target = utcFromFields(local);
       if (!Number.isFinite(target)) return NaN;
@@ -127,7 +118,7 @@
       }).filter(x => Number.isFinite(x.instant));
       const exact = candidates.filter(x => matchesLocal(x.actual, local));
       if (exact.length) return Math.min(...exact.map(x => x.instant));
-      // 春季跳时所造成的不存在的时刻，使用跳时后的下一个对应时刻。
+      // In a spring-forward gap, choose the later corresponding instant.
       const later = candidates.filter(x => x.localUtc >= target)
         .sort((a, b) => a.localUtc - b.localUtc);
       if (later.length) return later[0].instant;
@@ -176,7 +167,7 @@
         { y: 1970, mo: 1, d: 1, h: 0, mi: 0, s: 0, ms: 0 } : null);
       if (!p) return nativeSetTime.call(this, NaN);
       const scratch = new NativeDate(utcFromFields(p));
-      // UTC setter本身支持溢出值（如 32 日、25 时），保持标准 Date 语义。
+      // Native UTC setters normalize overflow, preserving usual Date behavior.
       const normalizedMethod = 'setUTC' + method.slice(3);
       const result = NativeDate.prototype[normalizedMethod].apply(scratch, args);
       if (!Number.isFinite(result)) return nativeSetTime.call(this, NaN);
@@ -214,18 +205,32 @@
       const scratch = new NativeDate(utcFromFields(local));
       if (scratch.getUTCFullYear() !== local.y || scratch.getUTCMonth() + 1 !== local.mo ||
           scratch.getUTCDate() !== local.d || scratch.getUTCHours() !== local.h) {
-        // 24:00:00 合法，表示次日零时；其他溢出不是合法 ISO 日期。
+        // ISO permits 24:00:00 as midnight at the end of the day.
         if (local.h !== 24 || scratch.getUTCHours() !== 0) return NaN;
+      }
+      if (local.h === 24) {
+        const normalized = new NativeDate(utcFromFields(local));
+        local.y = normalized.getUTCFullYear();
+        local.mo = normalized.getUTCMonth() + 1;
+        local.d = normalized.getUTCDate();
+        local.h = 0;
       }
       return epochFromLocal(local);
     }
 
     function TimezoneDate(...args) {
       if (!new.target) return new TimezoneDate().toString();
-      if (args.length === 0) return new NativeDate();
+      // Preserve the prototype when a class extends Date.
+      const finish = value => {
+        if (new.target !== TimezoneDate) {
+          Object.setPrototypeOf(value, new.target.prototype);
+        }
+        return value;
+      };
+      if (args.length === 0) return finish(new NativeDate());
       if (args.length === 1) {
         const parsed = localIsoString(args[0]);
-        return new NativeDate(parsed === null ? args[0] : parsed);
+        return finish(new NativeDate(parsed === null ? args[0] : parsed));
       }
       const p = {
         y: Number(args[0]), mo: Number(args[1]) + 1,
@@ -236,16 +241,17 @@
         ms: args.length > 6 ? Number(args[6]) : 0,
       };
       if (p.y >= 0 && p.y <= 99) p.y += 1900;
-      return new NativeDate(epochFromLocal(p));
+      return finish(new NativeDate(epochFromLocal(p)));
     }
     Object.setPrototypeOf(TimezoneDate, NativeDate);
     TimezoneDate.prototype = NativeDate.prototype;
+    Object.defineProperty(NativeDate.prototype, 'constructor', { value: TimezoneDate, configurable: true, writable: true });
     Object.defineProperty(TimezoneDate, 'name', { value: 'Date' });
     TimezoneDate.parse = s => {
       const parsed = localIsoString(String(s));
       return parsed === null ? NativeDate.parse(s) : parsed;
     };
-    window.Date = TimezoneDate;
+    page.Date = TimezoneDate;
 
     function localDateText(p) {
       const dow = new NativeDate(utcFromFields({ ...p, h: 0, mi: 0, s: 0, ms: 0 })).getUTCDay();
@@ -276,8 +282,7 @@
       return p ? `${localDateText(p)} ${localTimeText(ms, p)}` : 'Invalid Date';
     };
 
-    // Intl.DateTimeFormat() / new Intl.DateTimeFormat() 均走目标时区。
-    // 若网页显式传入 timeZone，则尊重网页的显式选择。
+    // Respect an explicitly supplied timeZone; replace only the default.
     function DateTimeFormat(locales, options) {
       if (options != null && options.timeZone !== undefined) {
         return new NativeDTF(locales, options);
@@ -287,7 +292,7 @@
     Object.setPrototypeOf(DateTimeFormat, NativeDTF);
     DateTimeFormat.prototype = NativeDTF.prototype;
     Object.defineProperty(DateTimeFormat, 'name', { value: 'DateTimeFormat' });
-    Intl.DateTimeFormat = DateTimeFormat;
+    page.Intl.DateTimeFormat = DateTimeFormat;
 
     for (const [method, type] of [
       ['toLocaleString', 'datetime'],
@@ -309,105 +314,203 @@
       };
     }
 
-    // 若浏览器支持 Temporal，至少使其默认时区查询保持一致。
+    // Override the default Temporal timezone when the API is available.
     try {
-      if (typeof Temporal !== 'undefined' && Temporal.Now?.timeZoneId) {
-        Object.defineProperty(Temporal.Now, 'timeZoneId', {
+      if (page.Temporal?.Now?.timeZoneId) {
+        Object.defineProperty(page.Temporal.Now, 'timeZoneId', {
           value: () => zone, configurable: true, writable: true,
         });
       }
-    } catch { /* 部分浏览器不允许覆盖，跳过 */ }
+    } catch { /* Some browser implementations disallow this override. */ }
   }
 
-  // -------- 同一用户脚本的 GM 存储在不同站点之间共享 --------
-  const menuText = `🕒 设置时区（当前：${zone === SYSTEM ? '系统' : zone}）`;
-  GM_registerMenuCommand(menuText, () => {
-    const lines = choices.map(([z, name], i) => `${i}. ${name} [${z}]`);
-    const answer = prompt(
-      `Claude / Anthropic 全站统一时区\n当前：${zone}\n\n${lines.join('\n')}\n\n输入编号，或直接输入 IANA 时区名称：`,
-      zone,
-    );
-    if (answer === null) return;
-    const trimmed = answer.trim();
-    const index = /^\d+$/.test(trimmed) ? +trimmed : -1;
-    const selected = choices[index]?.[0] || trimmed;
-    if (selected) saveZone(selected);
-  });
 
-  // 其他 Claude / Anthropic 标签页更改设置时，自动刷新并应用。
+  // A single Tampermonkey script store is shared by all matched domains.
   if (typeof GM_addValueChangeListener === 'function') {
-    GM_addValueChangeListener(KEY, (_key, _old, latest, remote) => {
-      if (remote && latest !== zone) location.reload();
+    GM_addValueChangeListener(KEY, (_name, _oldValue, newValue, remote) => {
+      if (remote && newValue !== zone) page.location.reload();
     });
   }
 
-  // 移动端也可直接点页面左下角 TZ 按钮，不依赖扩展菜单。
-  function addControl() {
-    if (!document.body || document.getElementById('claude-tz-widget-root')) return;
+  // The live browser list is authoritative. This static fallback covers older browsers.
+  const fallbackZones = ["Africa/Abidjan","Africa/Accra","Africa/Addis_Ababa","Africa/Algiers","Africa/Asmara","Africa/Asmera","Africa/Bamako","Africa/Bangui","Africa/Banjul","Africa/Bissau","Africa/Blantyre","Africa/Brazzaville","Africa/Bujumbura","Africa/Cairo","Africa/Casablanca","Africa/Ceuta","Africa/Conakry","Africa/Dakar","Africa/Dar_es_Salaam","Africa/Djibouti","Africa/Douala","Africa/El_Aaiun","Africa/Freetown","Africa/Gaborone","Africa/Harare","Africa/Johannesburg","Africa/Juba","Africa/Kampala","Africa/Khartoum","Africa/Kigali","Africa/Kinshasa","Africa/Lagos","Africa/Libreville","Africa/Lome","Africa/Luanda","Africa/Lubumbashi","Africa/Lusaka","Africa/Malabo","Africa/Maputo","Africa/Maseru","Africa/Mbabane","Africa/Mogadishu","Africa/Monrovia","Africa/Nairobi","Africa/Ndjamena","Africa/Niamey","Africa/Nouakchott","Africa/Ouagadougou","Africa/Porto-Novo","Africa/Sao_Tome","Africa/Timbuktu","Africa/Tripoli","Africa/Tunis","Africa/Windhoek","America/Adak","America/Anchorage","America/Anguilla","America/Antigua","America/Araguaina","America/Argentina/Buenos_Aires","America/Argentina/Catamarca","America/Argentina/ComodRivadavia","America/Argentina/Cordoba","America/Argentina/Jujuy","America/Argentina/La_Rioja","America/Argentina/Mendoza","America/Argentina/Rio_Gallegos","America/Argentina/Salta","America/Argentina/San_Juan","America/Argentina/San_Luis","America/Argentina/Tucuman","America/Argentina/Ushuaia","America/Aruba","America/Asuncion","America/Atikokan","America/Atka","America/Bahia","America/Bahia_Banderas","America/Barbados","America/Belem","America/Belize","America/Blanc-Sablon","America/Boa_Vista","America/Bogota","America/Boise","America/Buenos_Aires","America/Cambridge_Bay","America/Campo_Grande","America/Cancun","America/Caracas","America/Catamarca","America/Cayenne","America/Cayman","America/Chicago","America/Chihuahua","America/Ciudad_Juarez","America/Coral_Harbour","America/Cordoba","America/Costa_Rica","America/Coyhaique","America/Creston","America/Cuiaba","America/Curacao","America/Danmarkshavn","America/Dawson","America/Dawson_Creek","America/Denver","America/Detroit","America/Dominica","America/Edmonton","America/Eirunepe","America/El_Salvador","America/Ensenada","America/Fort_Nelson","America/Fort_Wayne","America/Fortaleza","America/Glace_Bay","America/Godthab","America/Goose_Bay","America/Grand_Turk","America/Grenada","America/Guadeloupe","America/Guatemala","America/Guayaquil","America/Guyana","America/Halifax","America/Havana","America/Hermosillo","America/Indiana/Indianapolis","America/Indiana/Knox","America/Indiana/Marengo","America/Indiana/Petersburg","America/Indiana/Tell_City","America/Indiana/Vevay","America/Indiana/Vincennes","America/Indiana/Winamac","America/Indianapolis","America/Inuvik","America/Iqaluit","America/Jamaica","America/Jujuy","America/Juneau","America/Kentucky/Louisville","America/Kentucky/Monticello","America/Knox_IN","America/Kralendijk","America/La_Paz","America/Lima","America/Los_Angeles","America/Louisville","America/Lower_Princes","America/Maceio","America/Managua","America/Manaus","America/Marigot","America/Martinique","America/Matamoros","America/Mazatlan","America/Mendoza","America/Menominee","America/Merida","America/Metlakatla","America/Mexico_City","America/Miquelon","America/Moncton","America/Monterrey","America/Montevideo","America/Montreal","America/Montserrat","America/Nassau","America/New_York","America/Nipigon","America/Nome","America/Noronha","America/North_Dakota/Beulah","America/North_Dakota/Center","America/North_Dakota/New_Salem","America/Nuuk","America/Ojinaga","America/Panama","America/Pangnirtung","America/Paramaribo","America/Phoenix","America/Port-au-Prince","America/Port_of_Spain","America/Porto_Acre","America/Porto_Velho","America/Puerto_Rico","America/Punta_Arenas","America/Rainy_River","America/Rankin_Inlet","America/Recife","America/Regina","America/Resolute","America/Rio_Branco","America/Rosario","America/Santa_Isabel","America/Santarem","America/Santiago","America/Santo_Domingo","America/Sao_Paulo","America/Scoresbysund","America/Shiprock","America/Sitka","America/St_Barthelemy","America/St_Johns","America/St_Kitts","America/St_Lucia","America/St_Thomas","America/St_Vincent","America/Swift_Current","America/Tegucigalpa","America/Thule","America/Thunder_Bay","America/Tijuana","America/Toronto","America/Tortola","America/Vancouver","America/Virgin","America/Whitehorse","America/Winnipeg","America/Yakutat","America/Yellowknife","Antarctica/Casey","Antarctica/Davis","Antarctica/DumontDUrville","Antarctica/Macquarie","Antarctica/Mawson","Antarctica/McMurdo","Antarctica/Palmer","Antarctica/Rothera","Antarctica/South_Pole","Antarctica/Syowa","Antarctica/Troll","Antarctica/Vostok","Arctic/Longyearbyen","Asia/Aden","Asia/Almaty","Asia/Amman","Asia/Anadyr","Asia/Aqtau","Asia/Aqtobe","Asia/Ashgabat","Asia/Ashkhabad","Asia/Atyrau","Asia/Baghdad","Asia/Bahrain","Asia/Baku","Asia/Bangkok","Asia/Barnaul","Asia/Beirut","Asia/Bishkek","Asia/Brunei","Asia/Calcutta","Asia/Chita","Asia/Choibalsan","Asia/Chongqing","Asia/Chungking","Asia/Colombo","Asia/Dacca","Asia/Damascus","Asia/Dhaka","Asia/Dili","Asia/Dubai","Asia/Dushanbe","Asia/Famagusta","Asia/Gaza","Asia/Harbin","Asia/Hebron","Asia/Ho_Chi_Minh","Asia/Hong_Kong","Asia/Hovd","Asia/Irkutsk","Asia/Istanbul","Asia/Jakarta","Asia/Jayapura","Asia/Jerusalem","Asia/Kabul","Asia/Kamchatka","Asia/Karachi","Asia/Kashgar","Asia/Kathmandu","Asia/Katmandu","Asia/Khandyga","Asia/Kolkata","Asia/Krasnoyarsk","Asia/Kuala_Lumpur","Asia/Kuching","Asia/Kuwait","Asia/Macao","Asia/Macau","Asia/Magadan","Asia/Makassar","Asia/Manila","Asia/Muscat","Asia/Nicosia","Asia/Novokuznetsk","Asia/Novosibirsk","Asia/Omsk","Asia/Oral","Asia/Phnom_Penh","Asia/Pontianak","Asia/Pyongyang","Asia/Qatar","Asia/Qostanay","Asia/Qyzylorda","Asia/Rangoon","Asia/Riyadh","Asia/Saigon","Asia/Sakhalin","Asia/Samarkand","Asia/Seoul","Asia/Shanghai","Asia/Singapore","Asia/Srednekolymsk","Asia/Taipei","Asia/Tashkent","Asia/Tbilisi","Asia/Tehran","Asia/Tel_Aviv","Asia/Thimbu","Asia/Thimphu","Asia/Tokyo","Asia/Tomsk","Asia/Ujung_Pandang","Asia/Ulaanbaatar","Asia/Ulan_Bator","Asia/Urumqi","Asia/Ust-Nera","Asia/Vientiane","Asia/Vladivostok","Asia/Yakutsk","Asia/Yangon","Asia/Yekaterinburg","Asia/Yerevan","Atlantic/Azores","Atlantic/Bermuda","Atlantic/Canary","Atlantic/Cape_Verde","Atlantic/Faeroe","Atlantic/Faroe","Atlantic/Jan_Mayen","Atlantic/Madeira","Atlantic/Reykjavik","Atlantic/South_Georgia","Atlantic/St_Helena","Atlantic/Stanley","Australia/ACT","Australia/Adelaide","Australia/Brisbane","Australia/Broken_Hill","Australia/Canberra","Australia/Currie","Australia/Darwin","Australia/Eucla","Australia/Hobart","Australia/LHI","Australia/Lindeman","Australia/Lord_Howe","Australia/Melbourne","Australia/NSW","Australia/North","Australia/Perth","Australia/Queensland","Australia/South","Australia/Sydney","Australia/Tasmania","Australia/Victoria","Australia/West","Australia/Yancowinna","Brazil/Acre","Brazil/DeNoronha","Brazil/East","Brazil/West","Canada/Atlantic","Canada/Central","Canada/Eastern","Canada/Mountain","Canada/Newfoundland","Canada/Pacific","Canada/Saskatchewan","Canada/Yukon","Chile/Continental","Chile/EasterIsland","Europe/Amsterdam","Europe/Andorra","Europe/Astrakhan","Europe/Athens","Europe/Belfast","Europe/Belgrade","Europe/Berlin","Europe/Bratislava","Europe/Brussels","Europe/Bucharest","Europe/Budapest","Europe/Busingen","Europe/Chisinau","Europe/Copenhagen","Europe/Dublin","Europe/Gibraltar","Europe/Guernsey","Europe/Helsinki","Europe/Isle_of_Man","Europe/Istanbul","Europe/Jersey","Europe/Kaliningrad","Europe/Kiev","Europe/Kirov","Europe/Kyiv","Europe/Lisbon","Europe/Ljubljana","Europe/London","Europe/Luxembourg","Europe/Madrid","Europe/Malta","Europe/Mariehamn","Europe/Minsk","Europe/Monaco","Europe/Moscow","Europe/Nicosia","Europe/Oslo","Europe/Paris","Europe/Podgorica","Europe/Prague","Europe/Riga","Europe/Rome","Europe/Samara","Europe/San_Marino","Europe/Sarajevo","Europe/Saratov","Europe/Simferopol","Europe/Skopje","Europe/Sofia","Europe/Stockholm","Europe/Tallinn","Europe/Tirane","Europe/Tiraspol","Europe/Ulyanovsk","Europe/Uzhgorod","Europe/Vaduz","Europe/Vatican","Europe/Vienna","Europe/Vilnius","Europe/Volgograd","Europe/Warsaw","Europe/Zagreb","Europe/Zaporozhye","Europe/Zurich","Indian/Antananarivo","Indian/Chagos","Indian/Christmas","Indian/Cocos","Indian/Comoro","Indian/Kerguelen","Indian/Mahe","Indian/Maldives","Indian/Mauritius","Indian/Mayotte","Indian/Reunion","Mexico/BajaNorte","Mexico/BajaSur","Mexico/General","Pacific/Apia","Pacific/Auckland","Pacific/Bougainville","Pacific/Chatham","Pacific/Chuuk","Pacific/Easter","Pacific/Efate","Pacific/Enderbury","Pacific/Fakaofo","Pacific/Fiji","Pacific/Funafuti","Pacific/Galapagos","Pacific/Gambier","Pacific/Guadalcanal","Pacific/Guam","Pacific/Honolulu","Pacific/Johnston","Pacific/Kanton","Pacific/Kiritimati","Pacific/Kosrae","Pacific/Kwajalein","Pacific/Majuro","Pacific/Marquesas","Pacific/Midway","Pacific/Nauru","Pacific/Niue","Pacific/Norfolk","Pacific/Noumea","Pacific/Pago_Pago","Pacific/Palau","Pacific/Pitcairn","Pacific/Pohnpei","Pacific/Ponape","Pacific/Port_Moresby","Pacific/Rarotonga","Pacific/Saipan","Pacific/Samoa","Pacific/Tahiti","Pacific/Tarawa","Pacific/Tongatapu","Pacific/Truk","Pacific/Wake","Pacific/Wallis","Pacific/Yap","US/Alaska","US/Aleutian","US/Arizona","US/Central","US/East-Indiana","US/Eastern","US/Hawaii","US/Indiana-Starke","US/Michigan","US/Mountain","US/Pacific","US/Samoa"];
+  function getSupportedZones() {
+    let values = [];
+    try {
+      if (typeof page.Intl.supportedValuesOf === 'function') {
+        values = page.Intl.supportedValuesOf('timeZone');
+      }
+    } catch { /* Fall back to the bundled IANA directory. */ }
+    if (!Array.isArray(values) || values.length === 0) values = fallbackZones;
+    return [...new Set(['UTC', ...values, ...(zone !== SYSTEM ? [zone] : [])])].sort();
+  }
+
+  let openPicker = null;
+  if (typeof GM_registerMenuCommand === 'function') {
+    GM_registerMenuCommand(`Choose time zone (${zone === SYSTEM ? 'System' : zone})`, () => {
+      if (openPicker) return openPicker();
+      if (page.top === page && document.body) {
+        createWidget();
+        if (openPicker) openPicker();
+      } else if (page.top === page) {
+        document.addEventListener('DOMContentLoaded', () => {
+          createWidget();
+          if (openPicker) openPicker();
+        }, { once: true });
+      }
+    });
+  }
+
+  function createWidget() {
+    if (page.top !== page || !document.body || document.getElementById('ca-tz-host')) return;
     const host = document.createElement('div');
-    host.id = 'claude-tz-widget-root';
+    host.id = 'ca-tz-host';
     host.style.cssText = 'position:fixed;bottom:14px;left:14px;z-index:2147483647;pointer-events:none';
-    const root = host.attachShadow({ mode: 'closed' });
-    root.innerHTML = `
+    const shadow = host.attachShadow({ mode: 'closed' });
+    shadow.innerHTML = `
       <style>
+        :host { color-scheme:light dark; }
         * { box-sizing:border-box; }
-        .btn { background:#202733;color:#fff;border:1px solid #657184;border-radius:12px;
-          padding:9px 12px;cursor:pointer;font:13px system-ui,sans-serif;box-shadow:0 3px 15px #0003; }
-        .panel { width:min(310px,calc(100vw - 28px));margin-bottom:8px;padding:14px;
-          background:#fff;color:#18202a;border-radius:14px;border:1px solid #ddd;
-          box-shadow:0 5px 24px #0004;font:14px system-ui,sans-serif; }
-        .heading { font-weight:700;margin-bottom:5px; }
-        .hint { font-size:12px;color:#586273;margin-bottom:9px;overflow-wrap:anywhere; }
-        select,input { display:block;width:100%;height:36px;padding:6px;margin:7px 0;
-          background:white;color:#18202a;border:1px solid #b8c1cc;border-radius:7px;font:13px system-ui,sans-serif; }
-        .actions { display:flex;gap:8px;margin-top:10px; }
-        .actions button { flex:1; }
-        #apply { background:#2957cc;border-color:#2957cc; }
+        .fab { appearance:none;background:#242b39;color:#fff;border:1px solid #65738a;
+          border-radius:12px;padding:9px 12px;font:600 13px system-ui,sans-serif;cursor:pointer;
+          box-shadow:0 4px 14px #0004; }
+        .panel { width:min(370px,calc(100vw - 28px));max-height:min(74vh,620px);overflow:auto;
+          margin-bottom:9px;padding:16px;border:1px solid #d6dae4;border-radius:15px;
+          background:#fff;color:#171f2e;box-shadow:0 12px 40px #0005;font:14px system-ui,sans-serif; }
+        .header { display:flex;justify-content:space-between;align-items:center;gap:10px; }
+        .title { font-size:16px;font-weight:750; }
+        .caption { font-size:12px;color:#586478;margin-top:5px;overflow-wrap:anywhere; }
+        .selected { padding:9px 10px;margin-top:12px;border-radius:8px;background:#eef3fd;
+          font-size:13px;overflow-wrap:anywhere; }
+        .selected strong { display:block;margin-top:3px; }
+        label { display:block;margin-top:14px;margin-bottom:6px;font-size:12px;font-weight:700; }
+        input { width:100%;height:40px;border:1px solid #abb8ca;border-radius:8px;
+          padding:9px 10px;background:white;color:#182334;font:13px system-ui,sans-serif; }
+        input:focus { outline:2px solid #4d76d6;outline-offset:1px; }
+        .list { border:1px solid #d5dce9;border-radius:8px;margin-top:6px;
+          max-height:216px;overflow-y:auto;overscroll-behavior:contain; }
+        .item { display:block;width:100%;border:0;border-bottom:1px solid #edf0f5;
+          border-radius:0;background:transparent;color:#1a273a;text-align:left;
+          padding:8px 10px;font:13px system-ui,sans-serif;cursor:pointer; }
+        .item:hover,.item:focus { background:#eef4ff;outline:none; }
+        .item.active { background:#e4edfc;font-weight:700; }
+        .count,.error { font-size:12px;margin-top:7px; }
+        .count { color:#637087; }
+        .error { color:#b42318; }
+        .actions { display:flex;gap:8px;margin-top:12px; }
+        .action { appearance:none;flex:1;border-radius:9px;border:1px solid #aeb9c9;
+          background:#fff;color:#213047;padding:10px 8px;font:600 13px system-ui,sans-serif;cursor:pointer; }
+        .primary { border-color:#385ed0;background:#385ed0;color:#fff; }
+        .system { width:100%;text-align:center;margin-top:9px; }
+        .tip { margin-top:12px;color:#637087;font-size:11px;line-height:1.5; }
         [hidden] { display:none !important; }
+        @media (prefers-color-scheme:dark) {
+          .panel { background:#19212e;color:#f2f4f8;border-color:#3c485c; }
+          .caption,.count,.tip { color:#a8b5ca; }
+          .selected { background:#2d3a4e; }
+          input { background:#232f40;color:#f2f4f8;border-color:#627088; }
+          .list { border-color:#455369; }
+          .item { color:#f2f4f8;border-bottom-color:#364356; }
+          .item:hover,.item:focus,.item.active { background:#354665; }
+          .action { background:#28364a;color:#f1f4f9;border-color:#60718b; }
+          .primary { background:#385ed0;border-color:#385ed0;color:#fff; }
+          .error { color:#ff9b91; }
+        }
       </style>
-      <div class="panel" id="panel" hidden>
-        <div class="heading">Claude / Anthropic 时区</div>
-        <div class="hint" id="current"></div>
-        <select id="choices" aria-label="选择时区"></select>
-        <input id="custom" placeholder="例如 America/Phoenix" aria-label="自定义 IANA 时区" hidden>
-        <div class="actions">
-          <button class="btn" id="close" type="button">取消</button>
-          <button class="btn" id="apply" type="button">保存并刷新</button>
+      <section id="panel" class="panel" role="dialog" aria-label="Time zone switcher" hidden>
+        <div class="header"><span class="title">Time zone switcher</span>
+          <button id="closeX" class="action" type="button" style="flex:0 0 auto;padding:5px 10px" aria-label="Close">✕</button>
         </div>
-      </div>
-      <button class="btn" id="toggle" type="button" title="设置 Claude / Anthropic 时区">🕒 TZ</button>
+        <div class="caption">One setting for Claude and Anthropic websites. Automatically handles daylight saving time.</div>
+        <div class="selected">Current setting:<strong id="current"></strong></div>
+        <label for="search">Search or enter any IANA time zone</label>
+        <input id="search" type="search" autocomplete="off" spellcheck="false"
+          placeholder="e.g. America/Phoenix" aria-label="Search time zones" />
+        <div id="list" class="list" role="listbox" aria-label="Available time zones"></div>
+        <div id="count" class="count"></div>
+        <div id="error" class="error" role="alert" hidden></div>
+        <div class="actions">
+          <button id="cancel" class="action" type="button">Cancel</button>
+          <button id="save" class="action primary" type="button">Save &amp; reload</button>
+        </div>
+        <button id="system" class="action system" type="button">Use system time zone</button>
+        <div class="tip">Search the complete list, or type a valid IANA alias not shown in it. Press Enter to save your typed time zone. JavaScript time zone only; it does not change your IP, device settings, or server-side account region.</div>
+      </section>
+      <button id="toggle" class="fab" type="button" title="Choose time zone">🕒 TZ</button>
     `;
-    const $ = id => root.getElementById(id);
-    const selector = $('choices');
-    for (const [value, label] of choices) {
-      const opt = document.createElement('option');
-      opt.value = value;
-      opt.textContent = label;
-      selector.appendChild(opt);
+    const $ = id => shadow.getElementById(id);
+    const list = $('list');
+    const search = $('search');
+    const allZones = getSupportedZones();
+    let selected = zone;
+    const maxVisible = 120;
+
+    const currentLabel = x => x === SYSTEM ? `System (${systemZone})` : x;
+    function showStatus() {
+      $('current').textContent = currentLabel(selected);
     }
-    const customOpt = document.createElement('option');
-    customOpt.value = '__custom__';
-    customOpt.textContent = '自定义 IANA 时区…';
-    selector.appendChild(customOpt);
-    if (choices.some(([value]) => value === zone)) {
-      selector.value = zone;
-    } else {
-      selector.value = '__custom__';
-      $('custom').value = zone;
+    function error(message, isError = false) {
+      $('error').hidden = !isError;
+      $('error').textContent = isError ? message : '';
     }
-    $('current').textContent = `已保存：${zone === SYSTEM ? '跟随系统' : zone}（全站共享）`;
-    function syncCustom() { $('custom').hidden = selector.value !== '__custom__'; }
-    syncCustom();
-    selector.addEventListener('change', syncCustom);
-    $('toggle').addEventListener('click', () => { $('panel').hidden = !$('panel').hidden; });
-    $('close').addEventListener('click', () => { $('panel').hidden = true; });
-    $('apply').addEventListener('click', () => {
-      const v = selector.value === '__custom__' ? $('custom').value : selector.value;
-      saveZone(v);
+    function renderResults() {
+      const q = search.value.trim().toLowerCase().replaceAll(' ', '_');
+      const found = q ? allZones.filter(z => z.toLowerCase().includes(q)) : allZones;
+      const fragment = document.createDocumentFragment();
+      for (const value of found.slice(0, maxVisible)) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'item' + (value === selected ? ' active' : '');
+        item.setAttribute('role', 'option');
+        item.setAttribute('aria-selected', String(value === selected));
+        item.textContent = value;
+        item.addEventListener('click', () => {
+          selected = value;
+          search.value = value;
+          showStatus();
+          error('');
+          renderResults();
+        });
+        fragment.appendChild(item);
+      }
+      list.replaceChildren(fragment);
+      $('count').textContent = found.length === 0
+        ? 'No exact list match. You can still enter any valid IANA alias.'
+        : `Showing ${Math.min(found.length, maxVisible)} of ${found.length} matching time zones`;
+    }
+    function applySelection() {
+      const typed = search.value.trim();
+      // Blank search means keep the current selection.
+      saveZone(typed || selected, error);
+    }
+    openPicker = () => {
+      selected = zone;
+      search.value = '';
+      showStatus();
+      error('');
+      renderResults();
+      $('panel').hidden = false;
+      search.focus();
+    };
+    $('toggle').addEventListener('click', () => {
+      if ($('panel').hidden) openPicker();
+      else $('panel').hidden = true;
+    });
+    $('closeX').addEventListener('click', () => { $('panel').hidden = true; });
+    $('cancel').addEventListener('click', () => { $('panel').hidden = true; });
+    $('system').addEventListener('click', () => saveZone(SYSTEM, error));
+    $('save').addEventListener('click', applySelection);
+    search.addEventListener('input', () => { error(''); renderResults(); });
+    search.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); applySelection(); }
+      if (event.key === 'Escape') { event.preventDefault(); $('panel').hidden = true; }
     });
     host.style.pointerEvents = 'auto';
     document.body.appendChild(host);
   }
-  if (document.body) addControl();
-  else document.addEventListener('DOMContentLoaded', addControl, { once: true });
+
+  if (page.top === page) {
+    if (document.body) createWidget();
+    else document.addEventListener('DOMContentLoaded', createWidget, { once: true });
+  }
 })();
