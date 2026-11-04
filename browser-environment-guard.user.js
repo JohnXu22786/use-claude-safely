@@ -20,6 +20,10 @@
 // @grant        GM_addValueChangeListener
 // @connect      api.ipify.org
 // @connect      ipapi.co
+// @connect      ipv4.icanhazip.com
+// @connect      checkip.amazonaws.com
+// @connect      ipwho.is
+// @connect      ipinfo.io
 // ==/UserScript==
 
 (() => {
@@ -704,7 +708,7 @@
     return { ok: true, info: 'Setting passed its JavaScript check.' };
   }
 
-  const rtcState = { state: 'checking', details: 'Starting external WebRTC check...', httpIPv4: null };
+  const rtcState = { state: 'checking', details: 'Starting WebRTC check...', httpIPv4: null, httpIPs:[],ipDisagreement:false };
   const subscribers = new Set();
   function updateRtc(state, details) {
     rtcState.state = state;
@@ -730,82 +734,118 @@
     if (a === 100 && b >= 64 && b <= 127) return false;
     return true;
   }
-  function externalIPv4() {
+  // Independent providers help when one endpoint fails or routes through another exit.
+  // Each external request reveals the current network exit to that provider.
+  function gmRead(url, timeout = 4800) {
     return new Promise(resolve => {
       if (typeof GM_xmlhttpRequest !== 'function') return resolve(null);
+      let settled = false, req;
+      const finish = value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(watchdog);
+        resolve(value);
+      };
+      const watchdog = setTimeout(() => finish(null), timeout + 500);
       try {
-        GM_xmlhttpRequest({
-          method: 'GET', url: 'https://api.ipify.org?format=json', timeout: 5500,
-          onload: response => {
-            try {
-              const ip = JSON.parse(response.responseText).ip;
-              resolve(ipv4(ip) ? ip : null);
-            } catch { resolve(null); }
-          },
-          onerror: () => resolve(null), ontimeout: () => resolve(null),
-        });
-      } catch { resolve(null); }
+        req = GM_xmlhttpRequest({method:'GET',url,timeout,
+          onload:r => finish(r.status === 200 ? String(r.responseText || '') : null),
+          onerror:()=>finish(null),ontimeout:()=>finish(null),onabort:()=>finish(null)});
+      } catch { finish(null); }
     });
   }
-  function iceCandidates() {
+  const readJSON = async url => { try { return JSON.parse(await gmRead(url)); } catch { return null; } };
+  const ipSources = [
+    async () => (await readJSON('https://api.ipify.org?format=json'))?.ip,
+    async () => (await gmRead('https://ipv4.icanhazip.com/'))?.trim(),
+    async () => (await gmRead('https://checkip.amazonaws.com/'))?.trim(),
+  ];
+  async function externalIPv4() {
+    const first = await Promise.all(ipSources.slice(0,2).map(fn => fn().catch(()=>null)));
+    let values = first.filter(publicIPv4);
+    // Consult the independent third source if the first pair fails or disagrees.
+    if (values.length < 2 || (values.length === 2 && values[0] !== values[1])) {
+      const last = await ipSources[2]().catch(()=>null);
+      if (publicIPv4(last)) values.push(last);
+    }
+    const ips = [...new Set(values)];
+    const counts = ips.map(ip => values.filter(x => x === ip).length);
+    const best = counts.length ? Math.max(...counts) : 0;
+    return {ip: ips.length === 1 || best >= 2 ? ips[counts.indexOf(best)] : null,
+      ips, disagreement:ips.length > 1};
+  }
+  const iceServers = [
+    {name:'Google', urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']},
+    {name:'Cloudflare', urls:['stun:stun.cloudflare.com:3478']},
+  ];
+  function iceAttempt(server) {
     return new Promise(resolve => {
-      if (typeof page.RTCPeerConnection !== 'function') return resolve({ candidates: [], error: 'WebRTC unavailable' });
-      let pc = null;
-      let completed = false;
+      if (typeof page.RTCPeerConnection !== 'function')
+        return resolve({candidates:[],error:'WebRTC unavailable'});
+      let pc, ended = false;
       const candidates = [];
-      const finish = error => {
-        if (completed) return;
-        completed = true;
-        clearTimeout(timeout);
-        try { pc?.close(); } catch {}
-        resolve({ candidates, error: error || null });
+      const collect = raw => {
+        const m = /(?:^|\s)[^\s]+\s+\d+\s+(?:udp|tcp)\s+\d+\s+([^\s]+)\s+\d+\s+typ\s+(host|srflx|relay|prflx)/i.exec(raw || '');
+        if (m) candidates.push({ip:m[1].replace(/^\[|\]$/g,''),type:m[2]});
       };
-      const timeout = setTimeout(() => finish('ICE gathering timed out'), 7200);
+      const finish = error => {
+        if (ended) return;
+        ended = true;
+        clearTimeout(timer);
+        // SDP sometimes contains candidates which were omitted from events.
+        try { for (const line of (pc?.localDescription?.sdp || '').split('\n'))
+          if (line.includes('candidate:')) collect(line); } catch {}
+        try { pc?.close(); } catch {}
+        resolve({candidates,error:error || null});
+      };
+      const timer = setTimeout(()=>finish('timed out'),6400);
       try {
-        pc = new page.RTCPeerConnection({ iceServers: [
-          { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-        ] });
-        pc.onicecandidate = ev => {
-          if (!ev.candidate) return finish(null);
-          const match = /(?:^|\s)(\d+|[\da-f]+)\s+(\d+|udp|tcp)\s+\d+\s+([^\s]+)\s+\d+\s+typ\s+(host|srflx|relay|prflx)/i
-            .exec(ev.candidate.candidate || '');
-          if (match) candidates.push({ ip: match[3], type: match[4] });
-        };
+        pc = new page.RTCPeerConnection({iceServers:[{urls:server.urls}]});
+        pc.onicecandidate = ev => ev.candidate ? collect(ev.candidate.candidate) : finish(null);
         pc.onicegatheringstatechange = () => {
           if (pc.iceGatheringState === 'complete') finish(null);
         };
-        pc.createDataChannel('network-check');
-        pc.createOffer().then(offer => pc.setLocalDescription(offer)).catch(err => finish(err.message));
-      } catch (err) { finish(err.message); }
+        pc.createDataChannel('env-network-check');
+        pc.createOffer().then(offer => pc.setLocalDescription(offer))
+          .catch(err => finish(err?.message || 'offer failed'));
+      } catch(err) { finish(err?.message || 'unavailable'); }
     });
+  }
+  async function iceCandidates() {
+    const results = await Promise.all(iceServers.map(iceAttempt));
+    return {candidates:results.flatMap(x=>x.candidates),
+      completed:results.filter(x=>!x.error).length, attempts:results.length,
+      errors:results.filter(x=>x.error).map(x=>x.error)};
   }
   let rtcRunning = null;
   async function runRtcCheck() {
     if (!applied.rtc) { updateRtc('off', 'Automatic checking is disabled.'); return; }
     if (rtcRunning) return rtcRunning;
-    updateRtc('checking', 'Checking WebRTC…');
+    updateRtc('checking', 'Checking independent HTTP/IP and STUN routes…');
     rtcRunning = (async () => {
-      const [publicIp, result] = await Promise.all([externalIPv4(), iceCandidates()]);
+      const [http, ice] = await Promise.all([externalIPv4(), iceCandidates()]);
       if (!applied.rtc) { updateRtc('off', 'Automatic checking is disabled.'); return; }
-      rtcState.httpIPv4 = publicIp;
-      const peerV4 = [...new Set(result.candidates.filter(c =>
-        (c.type === 'srflx' || c.type === 'prflx' || c.type === 'host') && publicIPv4(c.ip))
-        .map(c => c.ip))];
-      const mismatched = publicIp && peerV4.filter(ip => ip !== publicIp);
-      if (mismatched?.length) {
-        updateRtc('leak', `WebRTC exposed ${mismatched.join(', ')}, different from the HTTP exit IP ${publicIp}.`);
-      } else if (!publicIp) {
-        updateRtc('limited', 'HTTP IP unavailable; WebRTC comparison incomplete.');
-      } else if (result.error) {
-        updateRtc('limited', `ICE incomplete: ${result.error}. No confirmed public-IP mismatch.`);
+      rtcState.httpIPv4 = http.ip;
+      rtcState.httpIPs = http.ips;
+      rtcState.ipDisagreement = http.disagreement;
+      const peerV4 = [...new Set(ice.candidates.filter(c =>
+        ['srflx','prflx','host'].includes(c.type) && publicIPv4(c.ip)).map(c=>c.ip))];
+      const mismatch = http.ip && !http.disagreement && peerV4.filter(ip => ip !== http.ip);
+      if (mismatch?.length) {
+        updateRtc('leak', `Possible public-IP leak: WebRTC ${mismatch.join(', ')} vs HTTP ${http.ip}. Check browser or VPN routing.`);
+      } else if (http.disagreement) {
+        updateRtc('limited', `HTTP IP providers disagree (${http.ips.join(', ')}); WebRTC result inconclusive.`);
+      } else if (!http.ip) {
+        updateRtc('limited', 'HTTP IP unavailable across backup providers; comparison incomplete.');
       } else if (!peerV4.length) {
-        // LAN/private candidates and .local mDNS hostnames are explicitly ignored.
-        // No public candidate is a limited test, not an IP leak or a warning.
-        updateRtc('limited', `No public IPv4 ICE candidate observed; private LAN and mDNS candidates ignored. HTTP exit: ${publicIp}. Public WebRTC routing and IPv6 remain unverified.`);
+        updateRtc('limited', `No public IPv4 ICE candidate found via ${ice.attempts} STUN routes. Local/private addresses ignored.`);
+      } else if (ice.completed < ice.attempts) {
+        updateRtc('limited', `Observed WebRTC IPv4 matches HTTP ${http.ip}, but ${ice.attempts-ice.completed} STUN route(s) incomplete.`);
       } else {
-        updateRtc('safe', `No public IPv4 mismatch observed. HTTP exit: ${publicIp}. Private LAN candidates ignored; IPv6 and unobserved paths are not verified.`);
+        updateRtc('safe', `No observed public IPv4 mismatch across ${ice.attempts} STUN routes. IPv6 and blocked paths remain unverified.`);
       }
-    })().catch(err => updateRtc('limited', `Check incomplete: ${err.message}`)).finally(() => { rtcRunning = null; });
+    })().catch(err => updateRtc('limited', `Network check incomplete: ${err.message}`))
+      .finally(() => { rtcRunning = null; });
     return rtcRunning;
   }
 
@@ -819,26 +859,45 @@
     consistencyState.details = details;
     for (const cb of consistencyListeners) { try { cb(); } catch {} }
   }
-  function geoLookup() {
-    return new Promise(resolve => {
-      if (typeof GM_xmlhttpRequest !== 'function') return resolve(null);
+  const geoSources = [
+    async () => {
+      const d = await readJSON('https://ipapi.co/json/');
+      return d && !d.error ? {ip:d.ip, region:d.country_code || d.country, timezone:d.timezone} : null;
+    },
+    async () => {
+      const d = await readJSON('https://ipwho.is/');
+      return d && d.success !== false ? {ip:d.ip,region:d.country_code,timezone:d.timezone?.id} : null;
+    },
+    async () => {
+      const d = await readJSON('https://ipinfo.io/json');
+      return d ? {ip:d.ip,region:d.country,timezone:d.timezone} : null;
+    },
+  ];
+  async function geoLookup() {
+    const fetch = async fn => {
       try {
-        GM_xmlhttpRequest({
-          method:'GET', url:'https://ipapi.co/json/', timeout:7000,
-          onload: response => {
-            try {
-              if (response.status !== 200) return resolve(null);
-              const d=JSON.parse(response.responseText);
-              if (d.error || !validRegion(d.country_code || d.country)) return resolve(null);
-              resolve({ip:String(d.ip || ''),region:validRegion(d.country_code || d.country),
-                timezone:validZone(d.timezone) || null});
-            } catch { resolve(null); }
-          },
-          onerror:()=>resolve(null),ontimeout:()=>resolve(null),
-        });
-      } catch { resolve(null); }
-    });
+        const d = await fn();
+        const region = validRegion(d?.region);
+        return region ? {ip: String(d.ip||''),region,
+          timezone:validZone(d.timezone) || null} : null;
+      } catch { return null; }
+    };
+    const first = await Promise.all(geoSources.slice(0,2).map(fetch));
+    let results = first.filter(Boolean);
+    if (results.length < 2 || (results.length === 2 && results[0].region !== results[1].region)) {
+      const third = await fetch(geoSources[2]);
+      if (third) results.push(third);
+    }
+    if (!results.length) return null;
+    const regions = [...new Set(results.map(x=>x.region))];
+    const counts = regions.map(r=>results.filter(x=>x.region===r).length);
+    const best = Math.max(...counts);
+    if (regions.length > 1 && best < 2) return {disagreement:true,region:null,ip:null,timezone:null};
+    const region = regions[counts.indexOf(best)];
+    const chosen = results.find(x=>x.region===region);
+    return {...chosen, disagreement:regions.length>1};
   }
+
   // IANA zones used by a country, including zones with shared offsets.
   const tzPrefixes = {a:'Africa',b:'America',c:'Antarctica',d:'Arctic',e:'Asia',f:'Atlantic',g:'Australia',h:'Europe',i:'Indian',j:'Pacific'};
   const zoneCountries = Object.fromEntries(`h/Andorra=AD|e/Dubai=AEOMRESCTF|e/Kabul=AF|b/Antigua=AG|b/Anguilla=AI|h/Tirane=AL|e/Yerevan=AM|a/Luanda=AO|c/McMurdo=AQ|c/Casey=AQ|c/Davis=AQ|c/DumontDUrville=AQ|c/Mawson=AQ|c/Palmer=AQ|c/Rothera=AQ|c/Syowa=AQ|c/Troll=AQ|c/Vostok=AQ|b/Argentina/Buenos_Aires=AR|b/Argentina/Cordoba=AR|b/Argentina/Salta=AR|b/Argentina/Jujuy=AR|b/Argentina/Tucuman=AR|b/Argentina/Catamarca=AR|b/Argentina/La_Rioja=AR|b/Argentina/San_Juan=AR|b/Argentina/Mendoza=AR|b/Argentina/San_Luis=AR|b/Argentina/Rio_Gallegos=AR|b/Argentina/Ushuaia=AR|j/Pago_Pago=ASUM|h/Vienna=AT|g/Lord_Howe=AU|c/Macquarie=AU|g/Hobart=AU|g/Melbourne=AU|g/Sydney=AU|g/Broken_Hill=AU|g/Brisbane=AU|g/Lindeman=AU|g/Adelaide=AU|g/Darwin=AU|g/Perth=AU|g/Eucla=AU|b/Aruba=AW|h/Mariehamn=AX|e/Baku=AZ|h/Sarajevo=BA|b/Barbados=BB|e/Dhaka=BD|h/Brussels=BELUNL|a/Ouagadougou=BF|h/Sofia=BG|e/Bahrain=BH|a/Bujumbura=BI|a/Porto-Novo=BJ|b/St_Barthelemy=BL|f/Bermuda=BM|e/Brunei=BN|b/La_Paz=BO|b/Kralendijk=BQ|b/Noronha=BR|b/Belem=BR|b/Fortaleza=BR|b/Recife=BR|b/Araguaina=BR|b/Maceio=BR|b/Bahia=BR|b/Sao_Paulo=BR|b/Campo_Grande=BR|b/Cuiaba=BR|b/Santarem=BR|b/Porto_Velho=BR|b/Boa_Vista=BR|b/Manaus=BR|b/Eirunepe=BR|b/Rio_Branco=BR|b/Nassau=BS|e/Thimphu=BT|a/Gaborone=BW|h/Minsk=BY|b/Belize=BZ|b/St_Johns=CA|b/Halifax=CA|b/Glace_Bay=CA|b/Moncton=CA|b/Goose_Bay=CA|b/Blanc-Sablon=CA|b/Toronto=BSCA|b/Iqaluit=CA|b/Atikokan=CA|b/Winnipeg=CA|b/Resolute=CA|b/Rankin_Inlet=CA|b/Regina=CA|b/Swift_Current=CA|b/Edmonton=CA|b/Cambridge_Bay=CA|b/Inuvik=CA|b/Creston=CA|b/Dawson_Creek=CA|b/Fort_Nelson=CA|b/Whitehorse=CA|b/Dawson=CA|b/Vancouver=CA|i/Cocos=CC|a/Kinshasa=CD|a/Lubumbashi=CD|a/Bangui=CF|a/Brazzaville=CG|h/Zurich=CHDELI|a/Abidjan=BFCIGHGMGNISMLMRSHSLSNTG|j/Rarotonga=CK|b/Santiago=CL|b/Coyhaique=CL|b/Punta_Arenas=CL|j/Easter=CL|a/Douala=CM|e/Shanghai=CN|e/Urumqi=CN|b/Bogota=CO|b/Costa_Rica=CR|b/Havana=CU|f/Cape_Verde=CV|b/Curacao=CW|i/Christmas=CX|e/Nicosia=CY|e/Famagusta=CY|h/Prague=CZSK|h/Berlin=DEDKNOSESJ|h/Busingen=DE|a/Djibouti=DJ|h/Copenhagen=DK|b/Dominica=DM|b/Santo_Domingo=DO|a/Algiers=DZ|b/Guayaquil=EC|j/Galapagos=EC|h/Tallinn=EE|a/Cairo=EG|a/El_Aaiun=EH|a/Asmara=ER|h/Madrid=ES|a/Ceuta=ES|f/Canary=ES|a/Addis_Ababa=ET|h/Helsinki=AXFI|j/Fiji=FJ|f/Stanley=FK|j/Chuuk=FM|j/Pohnpei=FM|j/Kosrae=FM|f/Faroe=FO|h/Paris=FRMC|a/Libreville=GA|h/London=GBGGIMJE|b/Grenada=GD|e/Tbilisi=GE|b/Cayenne=GF|h/Guernsey=GG|a/Accra=GH|h/Gibraltar=GI|b/Nuuk=GL|b/Danmarkshavn=GL|b/Scoresbysund=GL|b/Thule=GL|a/Banjul=GM|a/Conakry=GN|b/Guadeloupe=GP|a/Malabo=GQ|h/Athens=GR|f/South_Georgia=GS|b/Guatemala=GT|j/Guam=GUMP|a/Bissau=GW|b/Guyana=GY|e/Hong_Kong=HK|b/Tegucigalpa=HN|h/Zagreb=HR|b/Port-au-Prince=HT|h/Budapest=HU|e/Jakarta=ID|e/Pontianak=ID|e/Makassar=ID|e/Jayapura=ID|h/Dublin=IE|e/Jerusalem=IL|h/Isle_of_Man=IM|e/Kolkata=IN|i/Chagos=IO|e/Baghdad=IQ|e/Tehran=IR|f/Reykjavik=IS|h/Rome=ITSMVA|h/Jersey=JE|b/Jamaica=JM|e/Amman=JO|e/Tokyo=AUJP|a/Nairobi=DJERETKEKMMGSOTZUGYT|e/Bishkek=KG|e/Phnom_Penh=KH|j/Tarawa=KIMHTVUMWF|j/Kanton=KI|j/Kiritimati=KI|i/Comoro=KM|b/St_Kitts=KN|e/Pyongyang=KP|e/Seoul=KR|e/Kuwait=KW|b/Cayman=KY|e/Almaty=KZ|e/Qyzylorda=KZ|e/Qostanay=KZ|e/Aqtobe=KZ|e/Aqtau=KZ|e/Atyrau=KZ|e/Oral=KZ|e/Vientiane=LA|e/Beirut=LB|b/St_Lucia=LC|h/Vaduz=LI|e/Colombo=LK|a/Monrovia=LR|a/Maseru=LS|h/Vilnius=LT|h/Luxembourg=LU|h/Riga=LV|a/Tripoli=LY|a/Casablanca=MA|h/Monaco=MC|h/Chisinau=MD|h/Podgorica=ME|b/Marigot=MF|i/Antananarivo=MG|j/Majuro=MH|j/Kwajalein=MH|h/Skopje=MK|a/Bamako=ML|e/Yangon=CCMM|e/Ulaanbaatar=MN|e/Hovd=MN|e/Macau=MO|j/Saipan=MP|b/Martinique=MQ|a/Nouakchott=MR|b/Montserrat=MS|h/Malta=MT|i/Mauritius=MU|i/Maldives=MVTF|a/Blantyre=MW|b/Mexico_City=MX|b/Cancun=MX|b/Merida=MX|b/Monterrey=MX|b/Matamoros=MX|b/Chihuahua=MX|b/Ciudad_Juarez=MX|b/Ojinaga=MX|b/Mazatlan=MX|b/Bahia_Banderas=MX|b/Hermosillo=MX|b/Tijuana=MX|e/Kuala_Lumpur=MY|e/Kuching=BNMY|a/Maputo=BIBWCDMWMZRWZMZW|a/Windhoek=NA|j/Noumea=NC|a/Niamey=NE|j/Norfolk=NF|a/Lagos=AOBJCDCFCGCMGAGQNENG|b/Managua=NI|h/Amsterdam=NL|h/Oslo=NO|e/Kathmandu=NP|j/Nauru=NR|j/Niue=NU|j/Auckland=AQNZ|j/Chatham=NZ|e/Muscat=OM|b/Panama=CAKYPA|b/Lima=PE|j/Tahiti=PF|j/Marquesas=PF|j/Gambier=PF|j/Port_Moresby=AQFMPG|j/Bougainville=PG|e/Manila=PH|e/Karachi=PK|h/Warsaw=PL|b/Miquelon=PM|j/Pitcairn=PN|b/Puerto_Rico=AGAIAWBLBQCACWDMGDGPKNLCMFMSPRSXTTVCVGVI|e/Gaza=PS|e/Hebron=PS|h/Lisbon=PT|f/Madeira=PT|f/Azores=PT|j/Palau=PW|b/Asuncion=PY|e/Qatar=BHQA|i/Reunion=RE|h/Bucharest=RO|h/Belgrade=BAHRMEMKRSSI|h/Kaliningrad=RU|h/Moscow=RU|h/Simferopol=RUUA|h/Kirov=RU|h/Volgograd=RU|h/Astrakhan=RU|h/Saratov=RU|h/Ulyanovsk=RU|h/Samara=RU|e/Yekaterinburg=RU|e/Omsk=RU|e/Novosibirsk=RU|e/Barnaul=RU|e/Tomsk=RU|e/Novokuznetsk=RU|e/Krasnoyarsk=RU|e/Irkutsk=RU|e/Chita=RU|e/Yakutsk=RU|e/Khandyga=RU|e/Vladivostok=RU|e/Ust-Nera=RU|e/Magadan=RU|e/Sakhalin=RU|e/Srednekolymsk=RU|e/Kamchatka=RU|e/Anadyr=RU|a/Kigali=RW|e/Riyadh=AQKWSAYE|j/Guadalcanal=FMSB|i/Mahe=SC|a/Khartoum=SD|h/Stockholm=SE|e/Singapore=AQMYSG|f/St_Helena=SH|h/Ljubljana=SI|d/Longyearbyen=SJ|h/Bratislava=SK|a/Freetown=SL|h/San_Marino=SM|a/Dakar=SN|a/Mogadishu=SO|b/Paramaribo=SR|a/Juba=SS|a/Sao_Tome=ST|b/El_Salvador=SV|b/Lower_Princes=SX|e/Damascus=SY|a/Mbabane=SZ|b/Grand_Turk=TC|a/Ndjamena=TD|i/Kerguelen=TF|a/Lome=TG|e/Bangkok=CXKHLATHVN|e/Dushanbe=TJ|j/Fakaofo=TK|e/Dili=TL|e/Ashgabat=TM|a/Tunis=TN|j/Tongatapu=TO|h/Istanbul=TR|b/Port_of_Spain=TT|j/Funafuti=TV|e/Taipei=TW|a/Dar_es_Salaam=TZ|h/Kyiv=UA|a/Kampala=UG|j/Midway=UM|j/Wake=UM|b/New_York=US|b/Detroit=US|b/Kentucky/Louisville=US|b/Kentucky/Monticello=US|b/Indiana/Indianapolis=US|b/Indiana/Vincennes=US|b/Indiana/Winamac=US|b/Indiana/Marengo=US|b/Indiana/Petersburg=US|b/Indiana/Vevay=US|b/Chicago=US|b/Indiana/Tell_City=US|b/Indiana/Knox=US|b/Menominee=US|b/North_Dakota/Center=US|b/North_Dakota/New_Salem=US|b/North_Dakota/Beulah=US|b/Denver=US|b/Boise=US|b/Phoenix=CAUS|b/Los_Angeles=US|b/Anchorage=US|b/Juneau=US|b/Sitka=US|b/Metlakatla=US|b/Yakutat=US|b/Nome=US|b/Adak=US|j/Honolulu=US|b/Montevideo=UY|e/Samarkand=UZ|e/Tashkent=UZ|h/Vatican=VA|b/St_Vincent=VC|b/Caracas=VE|b/Tortola=VG|b/St_Thomas=VI|e/Ho_Chi_Minh=VN|j/Efate=VU|j/Wallis=WF|j/Apia=WS|e/Aden=YE|i/Mayotte=YT|a/Johannesburg=LSSZZA|a/Lusaka=ZM|a/Harare=ZW`.split('|').map(record => {
@@ -899,6 +958,8 @@
       if (a && b && a !== b) issues.push(`${description}: ${a} vs ${b}`);
     };
     const ipCountry = geo?.region || null;
+    if (geo?.disagreement) issues.push('IP geolocation providers disagree');
+    if (rtc.ipDisagreement) issues.push('HTTP IP providers disagree');
     const zoneRegions = countriesForZone(v.timeZone);
     const zoneKnown = zoneRegions.length > 0;
     add(v.selectedRegion, ipCountry, 'Selected region vs IP country');
@@ -944,7 +1005,7 @@
     if (applied.fonts && !verifySync('fonts')) {
       issues.push('Font masking did not pass the supported JavaScript checks');
     }
-    if (geo?.ip && rtc.httpIPv4 && ipv4(geo.ip) && geo.ip !== rtc.httpIPv4) {
+    if (geo?.ip && rtc.httpIPv4 && !rtc.ipDisagreement && ipv4(geo.ip) && geo.ip !== rtc.httpIPv4) {
       issues.push(`HTTP IP providers disagree: ipapi.co ${geo.ip} vs api.ipify.org ${rtc.httpIPv4} (proxy rotation can cause this)`);
     }
     if (rtc.state === 'leak') issues.push(`WebRTC public-IP mismatch: ${rtc.details}`);
@@ -959,6 +1020,7 @@
       ['Timezone ', 'Timezone'],
       ['WebRTC public-IP mismatch', 'WebRTC / IP'],
       ['HTTP IP providers disagree', 'IP services'],
+      ['IP geolocation providers disagree', 'IP geography'],
       ['Browser language override', 'Language override'],
       ['Font masking', 'Font protection'],
       ['Intl locale override', 'Intl override'],
@@ -975,7 +1037,7 @@
     if (issues.length) return {
       state:'warning', details:`${short.length} conflict${short.length === 1 ? '' : 's'}: ${short.slice(0, 3).join(' · ')}${short.length > 3 ? ` · +${short.length - 3}` : ''}`,
     };
-    if (!geo) return {state:'unknown', details:'IP location unavailable · Comparison incomplete'};
+    if (!geo?.region) return {state:'unknown', details:'IP location unavailable or disputed · Comparison incomplete'};
     return {state:'ok', details:'No observed conflicts · Checks are limited to accessible signals'};
 
   }
@@ -1115,7 +1177,7 @@
           .toast.error {background:#591f28;border-color:#a44350;color:#ffc2c8;}
         }
       </style>
-      <button id="fab" class="fab" type="button" aria-label="Environment Manager; drag to move">TZ ⚙</button>
+      <button id="fab" class="fab" type="button" aria-label="Environment Manager; drag to move">ENV ⚙</button>
       <section id="panel" class="panel" role="dialog" aria-label="Environment Manager" hidden>
         <div class="head"><strong>Environment Settings</strong><button id="close" class="tiny" type="button" aria-label="Close">✕</button></div>
         <div class="summary" id="consistencyTop">
@@ -1164,7 +1226,7 @@
         </div>
         <div class="section">
           <div class="setting"><span class="label">Automatic WebRTC Leak Check</span><input id="rtcOn" type="checkbox" aria-label="Enable automatic WebRTC leak check"></div>
-          <div class="sub">Checks public IPv4 ICE vs HTTP IP. LAN/mDNS ignored; incomplete checks are neutral. Does not block WebRTC.</div>
+          <div class="sub">Cross-checks two STUN services and backup HTTP IP providers. Private IPs ignored; incomplete results are neutral.</div>
           <div class="status" id="rtcStatus"></div>
           <button id="rtcRetry" class="tiny" type="button">Check again</button>
         </div>
@@ -1296,14 +1358,14 @@
       let label = '';
       const regionWarning = prefs.ipConsistency && consistencyState.state === 'warning';
       switch (rtcState.state) {
-        case 'leak': label = '⚠ TZ !'; break;
-        case 'unknown': label = 'TZ ·'; break;
-        case 'checking': label = 'TZ …'; break;
-        case 'off': label = 'TZ ⚙'; break;
-        default: label = 'TZ ✓';
+        case 'leak': label = '⚠ ENV !'; break;
+        case 'unknown': label = 'ENV ·'; break;
+        case 'checking': label = 'ENV …'; break;
+        case 'off': label = 'ENV ⚙'; break;
+        default: label = 'ENV ✓';
       }
-      if (regionWarning && rtcState.state !== 'leak') label = '⚠ TZ !';
-      if (rtcState.state === 'limited' && !regionWarning) label = 'TZ ·';
+      if (regionWarning && rtcState.state !== 'leak') label = '⚠ ENV !';
+      if (rtcState.state === 'limited' && !regionWarning) label = 'ENV ·';
       fab.textContent = label;
       fab.className = `fab ${rtcState.state === 'leak' ? 'leak' : regionWarning ? 'consistency' : rtcState.state === 'off' ? 'off' : ''}`;
       $('rtcStatus').className = `status ${rtcState.state === 'leak' ? 'leak' : rtcState.state === 'safe' ? 'ok' : (rtcState.state === 'off' || rtcState.state === 'limited' || rtcState.state === 'unknown') ? '' : 'warning'}`;
@@ -1465,7 +1527,7 @@
     $('ipConsistencyOn').addEventListener('change',e=>{
       if (setting('ipConsistency',e.target.checked,false)) runConsistencyCheck();
     });
-    $('consistencyRetry').addEventListener('click',()=>runConsistencyCheck(true));
+    $('consistencyRetry').addEventListener('click',()=>{ runConsistencyCheck(true); if (prefs.rtc) runRtcCheck(); });
     $('rtcRetry').addEventListener('click', () => {
       if (!prefs.rtc) return message('Enable automatic WebRTC checks first.',true);
       runRtcCheck();
