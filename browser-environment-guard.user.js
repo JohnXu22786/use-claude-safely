@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude / Anthropic - Environment Manager
 // @namespace    https://userscripts.local/claude-anthropic-timezone
-// @description  Claude and webmail environment controls with focused IP/timezone/region and language-tag consistency alerts.
+// @description  Claude and webmail environment controls with concise consistency checks and independent coverage notes.
 // @match        https://claude.ai/*
 // @match        https://*.claude.ai/*
 // @match        https://claude.com/*
@@ -897,7 +897,12 @@ return headerResult;
 finally {clearTimeout(timer);}
 }
 return headerResult={status:'unavailable'};
-})().finally(()=>headerRunning=null);
+})().finally(()=>{headerRunning=null;
+try { if (typeof showPanel === 'function' && page.top===page) {
+// The current panel, when open, is updated by its consistency callback.
+for (const cb of consistencyListeners) { try { cb(); } catch {} }
+} } catch {}
+});
 return headerRunning;
 }
 const consistencyState = { state:'checking', details:'Checking IP, timezone, region and -CN language tags…' };
@@ -1093,6 +1098,44 @@ if (serial !== consistencySequence || !prefs.ipConsistency) return;
 const result = compareEnvironment(geoResult, rtcState,headerResult);
 updateConsistency(result.state,result.details);
 }
+// Coverage notes are separate from the top-level geographic consistency status.
+// A third-party echo sees its own request, not necessarily the site's navigation request.
+function observedLanguagePair() {
+const js = getEnvironmentSnapshot().primary;
+if (headerResult?.status !== 'observed' || !headerResult.acceptLanguage)
+return {kind:'unknown', detail:'HTTP Accept-Language unverified: echo blocked, unavailable, or omitted.'};
+const choices = String(headerResult.acceptLanguage).split(',').map((raw, index) => {
+const [tag, ...rest] = raw.trim().split(';');
+const quality = rest.find(s=>/^\s*q\s*=/i.test(s));
+const q = quality ? Number(quality.split('=')[1]) : 1;
+return {tag:validLanguage(tag),q:Number.isFinite(q)?q:0,index};
+}).filter(x=>x.tag&&x.q>0).sort((a,b)=>b.q-a.q||a.index-b.index);
+const http = choices[0]?.tag;
+if (!http || !js) return {kind:'unknown',detail:'HTTP or JavaScript primary language could not be established.'};
+if (http.toLowerCase()===js.toLowerCase()) return {kind:'match',detail:`HTTP/JS primary language ${js}: matched on external echo only.`};
+const base = s => s.toLowerCase().split('-')[0];
+if (base(http)===base(js) && (!http.includes('-') || !js.includes('-')))
+return {kind:'unknown',detail:`HTTP ${http} / JS ${js}: region was omitted in one signal; not necessarily a conflict.`};
+return {kind:'difference',detail:`HTTP ${http} / JS ${js}: different on external echo; target-site header unverified.`};
+}
+function coverageNotes() {
+const result=[];
+const language=observedLanguagePair();
+result.push({kind:language.kind, text:language.detail});
+if (applied.timezone!==SYSTEM || applied.regionEnabled || applied.localeEnabled || applied.languageEnabled || applied.matchLanguageRegions)
+result.push({kind:'unknown',text:'Workers, cross-origin frames and native browser signals: overrides not verified.'});
+if (applied.fonts)
+result.push({kind:'unknown',text:'Font masking is partial; native rendering and all font probes are not verified.'});
+if (applied.rtc)
+result.push({kind:'unknown',text:rtcState.state==='limited'||rtcState.state==='unknown'
+? 'WebRTC collection incomplete; IPv6 and blocked routes not verified.'
+: 'WebRTC IPv6 and routes blocked by browser/network policy are not verified.'});
+if (applied.ipConsistency || applied.rtc)
+result.push({kind:'unknown',text:'External IP lookups may use a different path than this website’s connection.'});
+result.push({kind:'unknown',text:'TLS/JA3/JA4 and high-entropy Client Hints are not verified by this userscript.'});
+return result;
+}
+
 const fallbackZones = ['UTC','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata',
 'Europe/London','Europe/Paris','Europe/Berlin','America/New_York',
 'America/Chicago','America/Denver','America/Los_Angeles','Australia/Sydney'];
@@ -1251,6 +1294,12 @@ white-space:normal;overflow-wrap:anywhere;}
 .summary {display:flex;gap:6px;align-items:center;margin:10px 0 2px;}
 .summary .status {margin:0;flex:1;min-width:0;font-size:11px;padding:8px;}
 .summary button {flex:none;padding:6px 10px;}
+.coverage {margin:7px 0 3px;padding:7px 9px;border:1px solid #d8e0eb;
+border-radius:8px;font-size:11px;overflow-wrap:anywhere;}
+.coverage summary {cursor:pointer;font-weight:600;line-height:1.5;}
+.coverage .item {padding:5px 0 4px;border-top:1px solid #e6eaf0;}
+.coverage .item:first-child {margin-top:7px;}
+.coverage .item.difference {color:#9a491b;}
 .status {margin-top:11px;padding:9px;border-radius:9px;background:#f0f4f9;
 color:#32435d;font-size:12px;overflow-wrap:anywhere;white-space:pre-line;}
 .status.ok {background:#eaf7ef;color:#17613c;}
@@ -1267,7 +1316,9 @@ text-align:center;}
 [hidden] {display:none!important;}
 @media (prefers-color-scheme:dark) {
 .panel {background:#17212e;color:#eef2f7;border-color:#39495e;}
-.section {border-color:#34465a;}
+.section,.coverage .item {border-color:#34465a;}
+.coverage {border-color:#465971;}
+.coverage .item.difference {color:#ffcb90;}
 .muted,.sub,.count {color:#acbdd2;}
 input[type=text],input[type=search] {background:#222f41;color:#fff;border-color:#697b92;}
 button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
@@ -1290,6 +1341,10 @@ button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
 <div class="status" id="consistencyStatus" role="status" aria-live="polite"></div>
 <button class="tiny" id="consistencyRetry" type="button" title="Recheck IP, timezone, region and language tags">↻</button>
 </div>
+<details class="coverage" id="coverageBox">
+<summary id="coverageSummary">Other signals: checking…</summary>
+<div id="coverageItems"></div>
+</details>
 <div class="section">
 <div class="label">Timezone</div>
 <div class="sub" id="tzNow"></div>
@@ -1460,6 +1515,22 @@ syncControls();
 if (prefs.ipConsistency) runConsistencyCheck();
 return result.ok;
 }
+function renderCoverage() {
+const notes=coverageNotes();
+const differences=notes.filter(n=>n.kind==='difference');
+const unknowns=notes.filter(n=>n.kind==='unknown');
+$('coverageSummary').textContent=differences.length
+? `Other signals: ${differences.length} observed difference · ${unknowns.length} limits (tap)`
+: `Other signals: ${unknowns.length} unverified limits (tap)`;
+const list=document.createDocumentFragment();
+for (const note of notes) {
+const item=document.createElement('div');
+item.className=`item ${note.kind}`;
+item.textContent=`${note.kind==='difference'?'⚠ ':note.kind==='match'?'✓ ':'• '}${note.text}`;
+list.appendChild(item);
+}
+$('coverageItems').replaceChildren(list);
+}
 function renderRtc() {
 let label = '';
 const regionWarning = prefs.ipConsistency && consistencyState.state === 'warning';
@@ -1476,6 +1547,7 @@ fab.textContent = label;
 fab.className = `fab ${rtcState.state === 'leak' ? 'leak' : regionWarning ? 'consistency' : rtcState.state === 'off' ? 'off' : ''}`;
 $('rtcStatus').className = `status ${rtcState.state === 'leak' ? 'leak' : rtcState.state === 'safe' ? 'ok' : (rtcState.state === 'off' || rtcState.state === 'limited' || rtcState.state === 'unknown') ? '' : 'warning'}`;
 $('rtcStatus').textContent = rtcState.state === 'limited' ? `INCOMPLETE: ${rtcState.details}` : `${rtcState.state.toUpperCase()}: ${rtcState.details}`;
+renderCoverage();
 }
 subscribers.add(renderRtc);
 function renderConsistency() {
@@ -1655,7 +1727,11 @@ if (setting('rtc',e.target.checked,false)) runRtcCheck();
 $('ipConsistencyOn').addEventListener('change',e=>{
 if (setting('ipConsistency',e.target.checked,false)) runConsistencyCheck();
 });
-$('consistencyRetry').addEventListener('click',()=>{ runConsistencyCheck(true); if (prefs.rtc) runRtcCheck(); });
+$('consistencyRetry').addEventListener('click',()=>{
+if (prefs.ipConsistency) runConsistencyCheck(true);
+else echoHeaders(true).finally(renderCoverage);
+if (prefs.rtc) runRtcCheck();
+});
 $('rtcRetry').addEventListener('click', () => {
 if (!prefs.rtc) return message('Enable automatic WebRTC checks first.',true);
 runRtcCheck();
@@ -1722,7 +1798,10 @@ else document.addEventListener('DOMContentLoaded',createWidget,{once:true});
 if (page.top === page) {
 updateZoneCountries();
 if (applied.ipConsistency) runConsistencyCheck(true);
-else updateConsistency('off','Automatic checks are disabled.');
+else {
+updateConsistency('off','Automatic checks are disabled.');
+echoHeaders().finally(() => { /* Coverage is rendered by the panel when opened. */ });
+}
 if (applied.rtc) runRtcCheck();
 else updateRtc('off','Automatic checking is disabled.');
 }
