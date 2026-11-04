@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude / Anthropic - Environment Manager
 // @namespace    https://userscripts.local/claude-anthropic-timezone
-// @description  Persistent timezone, region, matched browser languages, Intl locale, font privacy, and network consistency warnings. Draggable control; no unapproved reloads.
+// @description  Persistent timezone, region, matched browser languages, Intl locale, font privacy, and full environment consistency warnings. Draggable control; no unapproved reloads.
 // @match        https://claude.ai/*
 // @match        https://*.claude.ai/*
 // @match        https://claude.com/*
@@ -704,12 +704,13 @@
     return { ok: true, info: 'Setting passed its JavaScript check.' };
   }
 
-  const rtcState = { state: 'checking', details: 'Starting external WebRTC check...' };
+  const rtcState = { state: 'checking', details: 'Starting external WebRTC check...', httpIPv4: null };
   const subscribers = new Set();
   function updateRtc(state, details) {
     rtcState.state = state;
     rtcState.details = details;
     for (const callback of subscribers) { try { callback(); } catch {} }
+    if (prefs.ipConsistency && state !== 'checking') runConsistencyCheck();
   }
   function ipv4(ip) {
     const values = String(ip).split('.');
@@ -717,7 +718,11 @@
   }
   function publicIPv4(ip) {
     if (!ipv4(ip)) return false;
-    const [a, b] = ip.split('.').map(Number);
+    const [a, b, c] = ip.split('.').map(Number);
+    if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+    if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false;
+    if (a === 203 && b === 0 && c === 113) return false;
+    if (a === 192 && b === 88 && c === 99) return false;
     if (a === 10 || a === 127 || a === 0 || a >= 224) return false;
     if (a === 172 && b >= 16 && b <= 31) return false;
     if (a === 192 && b === 168) return false;
@@ -782,30 +787,32 @@
     rtcRunning = (async () => {
       const [publicIp, result] = await Promise.all([externalIPv4(), iceCandidates()]);
       if (!applied.rtc) { updateRtc('off', 'Automatic checking is disabled.'); return; }
-      const rawLocal = result.candidates.filter(c => c.type === 'host' &&
-        ipv4(c.ip) && !c.ip.endsWith('.local'));
+      rtcState.httpIPv4 = publicIp;
       const peerV4 = [...new Set(result.candidates.filter(c =>
         (c.type === 'srflx' || c.type === 'prflx' || c.type === 'host') && publicIPv4(c.ip))
         .map(c => c.ip))];
       const mismatched = publicIp && peerV4.filter(ip => ip !== publicIp);
       if (mismatched?.length) {
         updateRtc('leak', `WebRTC exposed ${mismatched.join(', ')}, different from the HTTP exit IP ${publicIp}.`);
-      } else if (rawLocal.length) {
-        updateRtc('unknown', 'WebRTC exposed a local LAN IPv4 address; this alone is not a public-IP leak.');
       } else if (!publicIp) {
         updateRtc('unknown', 'The public IP check did not finish; no reliable comparison is possible.');
-      } else if (result.error || !result.candidates.length) {
-        updateRtc('unknown', `No conclusive candidates (${result.error || 'none returned'}).`);
+      } else if (result.error) {
+        updateRtc('unknown', `ICE check incomplete (${result.error}). No public-IP conclusion is possible.`);
+      } else if (!peerV4.length) {
+        // LAN/private candidates and .local mDNS hostnames are explicitly ignored.
+        // No public candidate is a limited test, not an IP leak or a warning.
+        updateRtc('limited', `No public IPv4 ICE candidate observed; private LAN and mDNS candidates ignored. HTTP exit: ${publicIp}. Public WebRTC routing and IPv6 remain unverified.`);
       } else {
-        updateRtc('safe', `No mismatch in observed IPv4 candidates. HTTP exit IP: ${publicIp}. IPv6 and unobserved paths are not verified.`);
+        updateRtc('safe', `No public IPv4 mismatch observed. HTTP exit: ${publicIp}. Private LAN candidates ignored; IPv6 and unobserved paths are not verified.`);
       }
     })().catch(err => updateRtc('unknown', `Check could not complete: ${err.message}`)).finally(() => { rtcRunning = null; });
     return rtcRunning;
   }
 
 
-  // Informational exit-IP geolocation. This does not change the IP address.
-  const consistencyState = { state:'checking', details:'Checking selected region, timezone and HTTP exit location...' };
+  // Consistency is a cross-check across ALL script-visible environment signals,
+  // not just configured region/timezone. A disagreement is NOT proof of location.
+  const consistencyState = { state:'checking', details:'Checking browser language, Intl locale, region, timezone, UTC offset, HTTP IP and WebRTC...' };
   const consistencyListeners = new Set();
   function updateConsistency(state, details) {
     consistencyState.state = state;
@@ -840,30 +847,154 @@
     if (!clean) return [];
     return zoneCountries[clean] || zoneCountries[input] || [];
   }
+  function regionInLanguage(tag) {
+    try { return new nativeLocaleCtor(tag).region || null; }
+    catch { return null; }
+  }
+  function currentOffsetForZone(timeZone, instant = new NativeDate()) {
+    try {
+      const f = new NativeDTF('en-US-u-ca-gregory-nu-latn', {
+        timeZone, year:'numeric', month:'2-digit', day:'2-digit',
+        hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23',
+      });
+      const parts = Object.fromEntries(f.formatToParts(instant)
+        .filter(x => x.type !== 'literal').map(x => [x.type, Number(x.value)]));
+      const utcFromWall = NativeDate.UTC(parts.year, parts.month - 1, parts.day,
+        parts.hour, parts.minute, parts.second);
+      return Math.round((instant.getTime() - utcFromWall) / 60000);
+    } catch { return null; }
+  }
+  function getEnvironmentSnapshot() {
+    let locale = null, timeZone = null, numberLocale = null;
+    try {
+      const resolved = new page.Intl.DateTimeFormat().resolvedOptions();
+      locale = resolved.locale || null;
+      timeZone = resolved.timeZone || null;
+    } catch {}
+    try { numberLocale = new page.Intl.NumberFormat().resolvedOptions().locale; } catch {}
+    let primary = null, languageList = [];
+    try {
+      primary = page.navigator.language || null;
+      languageList = Array.from(page.navigator.languages || []);
+    } catch {}
+    let offset = null;
+    try { offset = new page.Date().getTimezoneOffset(); } catch {}
+    return {
+      primary, languageList, languageRegion:regionInLanguage(primary),
+      locale, localeRegion:regionInLanguage(locale),
+      numberLocale, numberRegion:regionInLanguage(numberLocale),
+      timeZone, offset,
+      // The saved Region is not an exposed browser setting when its switch is off.
+      selectedRegion:applied.regionEnabled ? applied.region : null,
+    };
+  }
+  function compareEnvironment(geo, rtc) {
+    const v = getEnvironmentSnapshot();
+    const issues = [], notes = [];
+    const add = (a,b,description) => {
+      if (a && b && a !== b) issues.push(`${description}: ${a} vs ${b}`);
+    };
+    const ipCountry = geo?.region || null;
+    const zoneRegions = countriesForZone(v.timeZone);
+    const zoneKnown = zoneRegions.length > 0;
+    add(v.selectedRegion, ipCountry, 'Selected region vs IP country');
+    add(v.languageRegion, ipCountry, 'Primary browser language region vs IP country');
+    add(v.localeRegion, ipCountry, 'Intl date locale region vs IP country');
+    add(v.numberRegion, ipCountry, 'Intl number locale region vs IP country');
+    add(v.selectedRegion, v.languageRegion, 'Selected region vs primary language region');
+    add(v.selectedRegion, v.localeRegion, 'Selected region vs Intl locale region');
+    add(v.selectedRegion, v.numberRegion, 'Selected region vs number locale region');
+    add(v.languageRegion, v.localeRegion, 'Primary language region vs Intl locale region');
+    add(v.localeRegion, v.numberRegion, 'Date vs number locale region');
+    if (v.primary && v.languageList.length && v.primary !== v.languageList[0]) {
+      issues.push(`navigator.language ${v.primary} differs from navigator.languages[0] ${v.languageList[0]}`);
+    }
+    if (zoneKnown) {
+      for (const [name,country] of [
+        ['IP country',ipCountry],['selected region',v.selectedRegion],
+        ['primary language region',v.languageRegion],['Intl locale region',v.localeRegion],
+      ]) {
+        if (country && !zoneRegions.includes(country)) {
+          issues.push(`Timezone ${v.timeZone} is not mapped to ${name} ${country}`);
+        }
+      }
+    } else if (v.timeZone) {
+      notes.push(`Country mapping unavailable for timezone ${v.timeZone}`);
+    }
+    const expectedOffset = v.timeZone ? currentOffsetForZone(v.timeZone) : null;
+    if (expectedOffset !== null && v.offset !== null &&
+        Number.isFinite(v.offset) && Math.abs(expectedOffset - v.offset) > 1) {
+      issues.push(`Timezone offset mismatch: Date ${v.offset} min vs ${v.timeZone} expected ${expectedOffset} min`);
+    }
+    if (applied.timezone !== SYSTEM && v.timeZone && validZone(applied.timezone) !== v.timeZone) {
+      issues.push(`Configured timezone ${applied.timezone} differs from exposed ${v.timeZone}`);
+    }
+    if (applied.languageEnabled || applied.matchLanguageRegions) {
+      const expected = effectiveLanguages(applied);
+      if (JSON.stringify(v.languageList) !== JSON.stringify(expected) || v.primary !== expected[0]) {
+        issues.push('Browser language override is not returning the expected language order');
+      }
+    }
+    if ((applied.localeEnabled || applied.regionEnabled) && v.localeRegion !==
+        regionInLanguage(effectiveLocale(applied))) {
+      issues.push(`Intl locale override is not exposing the expected region`);
+    }
+    if (applied.fonts && !verifySync('fonts')) {
+      issues.push('Font masking did not pass the supported JavaScript checks');
+    }
+    if (geo?.ip && rtc.httpIPv4 && ipv4(geo.ip) && geo.ip !== rtc.httpIPv4) {
+      issues.push(`HTTP IP providers disagree: ipapi.co ${geo.ip} vs api.ipify.org ${rtc.httpIPv4} (proxy rotation can cause this)`);
+    }
+    if (rtc.state === 'leak') issues.push(`WebRTC public-IP mismatch: ${rtc.details}`);
+    if (rtc.state === 'unknown') notes.push('WebRTC network check inconclusive');
+    if (rtc.state === 'limited') notes.push('WebRTC had no public IPv4 ICE candidate; LAN addresses ignored');
+    if (rtc.state === 'off') notes.push('WebRTC check disabled');
+    if (!geo) notes.push('HTTP exit-IP geolocation unavailable');
+    if (applied.regionEnabled !== prefs.regionEnabled ||
+        applied.region !== prefs.region || applied.locale !== prefs.locale ||
+        applied.localeEnabled !== prefs.localeEnabled ||
+        applied.timezone !== prefs.timezone ||
+        applied.languageEnabled !== prefs.languageEnabled ||
+        applied.matchLanguageRegions !== prefs.matchLanguageRegions ||
+        JSON.stringify(applied.languages) !== JSON.stringify(prefs.languages)) {
+      notes.push('Some saved settings are pending a user-approved reload; checks reflect the CURRENT page');
+    }
+    // Other languages are not compared to one IP country: multilingual users are normal.
+    const overview = [
+      `HTTP IP: ${geo ? `${geo.ip || 'unknown'} (${geo.region}${geo.timezone ? `, ${geo.timezone}` : ''})` : 'unavailable'}`,
+      `Browser languages: ${v.languageList.join(', ') || 'unavailable'}`,
+      `Intl: date=${v.locale || 'unknown'}, number=${v.numberLocale || 'unknown'}`,
+      `Region override: ${v.selectedRegion || 'off / browser-derived only'}`,
+      `Timezone: ${v.timeZone || 'unknown'}; Date offset: ${v.offset ?? 'unknown'} min`,
+      `WebRTC: ${rtc.state}; Fonts: ${applied.fonts ? 'mask enabled (limited API coverage)' : 'mask disabled'}`,
+    ];
+    if (issues.length) return {state:'warning', details:
+      `${issues.length} difference(s) found:\n• ${issues.join('\n• ')}\n\n${overview.join('\n')}` +
+      (notes.length ? `\n\nNotes: ${notes.join('; ')}` : '') +
+      '\nLocation differences are signals, not proof of an IP leak.'};
+    const unknown = !geo || rtc.state === 'unknown';
+    return {state:unknown ? 'unknown':'ok', details:
+      `${geo ? 'No compared country conflicts observed' : 'Local browser comparisons completed; IP country unavailable'}.\n${overview.join('\n')}` +
+      (notes.length ? `\nNotes: ${notes.join('; ')}` : '') +
+      '\nJavaScript checks cannot inspect HTTP Accept-Language, OS region, or all network paths.'};
+  }
   let geoResult = null;
+  let geoPromise = null;
+  let consistencySequence = 0;
   async function runConsistencyCheck(redo = false) {
-    if (!prefs.ipConsistency) { updateConsistency('off','Automatic country consistency checks are disabled.'); return; }
-    updateConsistency('checking','Checking approximate public-IP geolocation...');
-    if (redo || !geoResult) geoResult = await geoLookup();
-    if (!prefs.ipConsistency) return updateConsistency('off','Automatic checks are disabled.');
-    if (!geoResult) return updateConsistency('unknown','IP geolocation unavailable. Country and timezone agreement cannot be confirmed.');
-    const parts = [];
-    const targetRegion = prefs.regionEnabled ? prefs.region : null;
-    const targetTimezone = prefs.timezone !== SYSTEM ? prefs.timezone : null;
-    const zoneRegions = countriesForZone(targetTimezone);
-    if (targetRegion && targetRegion !== geoResult.region) {
-      parts.push(`Selected region ${targetRegion} differs from IP country ${geoResult.region}`);
+    const serial = ++consistencySequence;
+    if (!prefs.ipConsistency) {
+      updateConsistency('off','Environment consistency checks are disabled.'); return;
     }
-    if (targetRegion && zoneRegions.length && !zoneRegions.includes(targetRegion)) {
-      parts.push(`Timezone ${targetTimezone} is not mapped to selected region ${targetRegion}`);
-    }
-    if (targetTimezone && zoneRegions.length && !zoneRegions.includes(geoResult.region)) {
-      parts.push(`Timezone ${targetTimezone} is not mapped to IP country ${geoResult.region}`);
-    }
-    const description = `IP geolocation: ${geoResult.region} (${geoResult.ip || 'IP unavailable'})` +
-      (geoResult.timezone ? `, ${geoResult.timezone}` : '') + '.';
-    if (parts.length) updateConsistency('warning',`${parts.join('; ')}. ${description} These are location differences, not proof of a leak.`);
-    else updateConsistency('ok',`${description} No mapped country conflict observed. This does not verify your actual location or all browser APIs.`);
+    updateConsistency('checking','Checking all available browser environment signals and HTTP exit-IP location...');
+    if (redo) geoResult = null;
+    if (!geoResult && !geoPromise) geoPromise = geoLookup().then(result => {
+      geoResult = result; geoPromise = null; return result;
+    }, () => { geoPromise = null; return null; });
+    if (geoPromise) await geoPromise;
+    if (serial !== consistencySequence || !prefs.ipConsistency) return;
+    const result = compareEnvironment(geoResult, rtcState);
+    updateConsistency(result.state,result.details);
   }
 
   const fallbackZones = ["Africa/Abidjan","Africa/Accra","Africa/Addis_Ababa","Africa/Algiers","Africa/Asmara","Africa/Asmera","Africa/Bamako","Africa/Bangui","Africa/Banjul","Africa/Bissau","Africa/Blantyre","Africa/Brazzaville","Africa/Bujumbura","Africa/Cairo","Africa/Casablanca","Africa/Ceuta","Africa/Conakry","Africa/Dakar","Africa/Dar_es_Salaam","Africa/Djibouti","Africa/Douala","Africa/El_Aaiun","Africa/Freetown","Africa/Gaborone","Africa/Harare","Africa/Johannesburg","Africa/Juba","Africa/Kampala","Africa/Khartoum","Africa/Kigali","Africa/Kinshasa","Africa/Lagos","Africa/Libreville","Africa/Lome","Africa/Luanda","Africa/Lubumbashi","Africa/Lusaka","Africa/Malabo","Africa/Maputo","Africa/Maseru","Africa/Mbabane","Africa/Mogadishu","Africa/Monrovia","Africa/Nairobi","Africa/Ndjamena","Africa/Niamey","Africa/Nouakchott","Africa/Ouagadougou","Africa/Porto-Novo","Africa/Sao_Tome","Africa/Timbuktu","Africa/Tripoli","Africa/Tunis","Africa/Windhoek","America/Adak","America/Anchorage","America/Anguilla","America/Antigua","America/Araguaina","America/Argentina/Buenos_Aires","America/Argentina/Catamarca","America/Argentina/ComodRivadavia","America/Argentina/Cordoba","America/Argentina/Jujuy","America/Argentina/La_Rioja","America/Argentina/Mendoza","America/Argentina/Rio_Gallegos","America/Argentina/Salta","America/Argentina/San_Juan","America/Argentina/San_Luis","America/Argentina/Tucuman","America/Argentina/Ushuaia","America/Aruba","America/Asuncion","America/Atikokan","America/Atka","America/Bahia","America/Bahia_Banderas","America/Barbados","America/Belem","America/Belize","America/Blanc-Sablon","America/Boa_Vista","America/Bogota","America/Boise","America/Buenos_Aires","America/Cambridge_Bay","America/Campo_Grande","America/Cancun","America/Caracas","America/Catamarca","America/Cayenne","America/Cayman","America/Chicago","America/Chihuahua","America/Ciudad_Juarez","America/Coral_Harbour","America/Cordoba","America/Costa_Rica","America/Coyhaique","America/Creston","America/Cuiaba","America/Curacao","America/Danmarkshavn","America/Dawson","America/Dawson_Creek","America/Denver","America/Detroit","America/Dominica","America/Edmonton","America/Eirunepe","America/El_Salvador","America/Ensenada","America/Fort_Nelson","America/Fort_Wayne","America/Fortaleza","America/Glace_Bay","America/Godthab","America/Goose_Bay","America/Grand_Turk","America/Grenada","America/Guadeloupe","America/Guatemala","America/Guayaquil","America/Guyana","America/Halifax","America/Havana","America/Hermosillo","America/Indiana/Indianapolis","America/Indiana/Knox","America/Indiana/Marengo","America/Indiana/Petersburg","America/Indiana/Tell_City","America/Indiana/Vevay","America/Indiana/Vincennes","America/Indiana/Winamac","America/Indianapolis","America/Inuvik","America/Iqaluit","America/Jamaica","America/Jujuy","America/Juneau","America/Kentucky/Louisville","America/Kentucky/Monticello","America/Knox_IN","America/Kralendijk","America/La_Paz","America/Lima","America/Los_Angeles","America/Louisville","America/Lower_Princes","America/Maceio","America/Managua","America/Manaus","America/Marigot","America/Martinique","America/Matamoros","America/Mazatlan","America/Mendoza","America/Menominee","America/Merida","America/Metlakatla","America/Mexico_City","America/Miquelon","America/Moncton","America/Monterrey","America/Montevideo","America/Montreal","America/Montserrat","America/Nassau","America/New_York","America/Nipigon","America/Nome","America/Noronha","America/North_Dakota/Beulah","America/North_Dakota/Center","America/North_Dakota/New_Salem","America/Nuuk","America/Ojinaga","America/Panama","America/Pangnirtung","America/Paramaribo","America/Phoenix","America/Port-au-Prince","America/Port_of_Spain","America/Porto_Acre","America/Porto_Velho","America/Puerto_Rico","America/Punta_Arenas","America/Rainy_River","America/Rankin_Inlet","America/Recife","America/Regina","America/Resolute","America/Rio_Branco","America/Rosario","America/Santa_Isabel","America/Santarem","America/Santiago","America/Santo_Domingo","America/Sao_Paulo","America/Scoresbysund","America/Shiprock","America/Sitka","America/St_Barthelemy","America/St_Johns","America/St_Kitts","America/St_Lucia","America/St_Thomas","America/St_Vincent","America/Swift_Current","America/Tegucigalpa","America/Thule","America/Thunder_Bay","America/Tijuana","America/Toronto","America/Tortola","America/Vancouver","America/Virgin","America/Whitehorse","America/Winnipeg","America/Yakutat","America/Yellowknife","Antarctica/Casey","Antarctica/Davis","Antarctica/DumontDUrville","Antarctica/Macquarie","Antarctica/Mawson","Antarctica/McMurdo","Antarctica/Palmer","Antarctica/Rothera","Antarctica/South_Pole","Antarctica/Syowa","Antarctica/Troll","Antarctica/Vostok","Arctic/Longyearbyen","Asia/Aden","Asia/Almaty","Asia/Amman","Asia/Anadyr","Asia/Aqtau","Asia/Aqtobe","Asia/Ashgabat","Asia/Ashkhabad","Asia/Atyrau","Asia/Baghdad","Asia/Bahrain","Asia/Baku","Asia/Bangkok","Asia/Barnaul","Asia/Beirut","Asia/Bishkek","Asia/Brunei","Asia/Calcutta","Asia/Chita","Asia/Choibalsan","Asia/Chongqing","Asia/Chungking","Asia/Colombo","Asia/Dacca","Asia/Damascus","Asia/Dhaka","Asia/Dili","Asia/Dubai","Asia/Dushanbe","Asia/Famagusta","Asia/Gaza","Asia/Harbin","Asia/Hebron","Asia/Ho_Chi_Minh","Asia/Hong_Kong","Asia/Hovd","Asia/Irkutsk","Asia/Istanbul","Asia/Jakarta","Asia/Jayapura","Asia/Jerusalem","Asia/Kabul","Asia/Kamchatka","Asia/Karachi","Asia/Kashgar","Asia/Kathmandu","Asia/Katmandu","Asia/Khandyga","Asia/Kolkata","Asia/Krasnoyarsk","Asia/Kuala_Lumpur","Asia/Kuching","Asia/Kuwait","Asia/Macao","Asia/Macau","Asia/Magadan","Asia/Makassar","Asia/Manila","Asia/Muscat","Asia/Nicosia","Asia/Novokuznetsk","Asia/Novosibirsk","Asia/Omsk","Asia/Oral","Asia/Phnom_Penh","Asia/Pontianak","Asia/Pyongyang","Asia/Qatar","Asia/Qostanay","Asia/Qyzylorda","Asia/Rangoon","Asia/Riyadh","Asia/Saigon","Asia/Sakhalin","Asia/Samarkand","Asia/Seoul","Asia/Shanghai","Asia/Singapore","Asia/Srednekolymsk","Asia/Taipei","Asia/Tashkent","Asia/Tbilisi","Asia/Tehran","Asia/Tel_Aviv","Asia/Thimbu","Asia/Thimphu","Asia/Tokyo","Asia/Tomsk","Asia/Ujung_Pandang","Asia/Ulaanbaatar","Asia/Ulan_Bator","Asia/Urumqi","Asia/Ust-Nera","Asia/Vientiane","Asia/Vladivostok","Asia/Yakutsk","Asia/Yangon","Asia/Yekaterinburg","Asia/Yerevan","Atlantic/Azores","Atlantic/Bermuda","Atlantic/Canary","Atlantic/Cape_Verde","Atlantic/Faeroe","Atlantic/Faroe","Atlantic/Jan_Mayen","Atlantic/Madeira","Atlantic/Reykjavik","Atlantic/South_Georgia","Atlantic/St_Helena","Atlantic/Stanley","Australia/ACT","Australia/Adelaide","Australia/Brisbane","Australia/Broken_Hill","Australia/Canberra","Australia/Currie","Australia/Darwin","Australia/Eucla","Australia/Hobart","Australia/LHI","Australia/Lindeman","Australia/Lord_Howe","Australia/Melbourne","Australia/NSW","Australia/North","Australia/Perth","Australia/Queensland","Australia/South","Australia/Sydney","Australia/Tasmania","Australia/Victoria","Australia/West","Australia/Yancowinna","Brazil/Acre","Brazil/DeNoronha","Brazil/East","Brazil/West","Canada/Atlantic","Canada/Central","Canada/Eastern","Canada/Mountain","Canada/Newfoundland","Canada/Pacific","Canada/Saskatchewan","Canada/Yukon","Chile/Continental","Chile/EasterIsland","Europe/Amsterdam","Europe/Andorra","Europe/Astrakhan","Europe/Athens","Europe/Belfast","Europe/Belgrade","Europe/Berlin","Europe/Bratislava","Europe/Brussels","Europe/Bucharest","Europe/Budapest","Europe/Busingen","Europe/Chisinau","Europe/Copenhagen","Europe/Dublin","Europe/Gibraltar","Europe/Guernsey","Europe/Helsinki","Europe/Isle_of_Man","Europe/Istanbul","Europe/Jersey","Europe/Kaliningrad","Europe/Kiev","Europe/Kirov","Europe/Kyiv","Europe/Lisbon","Europe/Ljubljana","Europe/London","Europe/Luxembourg","Europe/Madrid","Europe/Malta","Europe/Mariehamn","Europe/Minsk","Europe/Monaco","Europe/Moscow","Europe/Nicosia","Europe/Oslo","Europe/Paris","Europe/Podgorica","Europe/Prague","Europe/Riga","Europe/Rome","Europe/Samara","Europe/San_Marino","Europe/Sarajevo","Europe/Saratov","Europe/Simferopol","Europe/Skopje","Europe/Sofia","Europe/Stockholm","Europe/Tallinn","Europe/Tirane","Europe/Tiraspol","Europe/Ulyanovsk","Europe/Uzhgorod","Europe/Vaduz","Europe/Vatican","Europe/Vienna","Europe/Vilnius","Europe/Volgograd","Europe/Warsaw","Europe/Zagreb","Europe/Zaporozhye","Europe/Zurich","Indian/Antananarivo","Indian/Chagos","Indian/Christmas","Indian/Cocos","Indian/Comoro","Indian/Kerguelen","Indian/Mahe","Indian/Maldives","Indian/Mauritius","Indian/Mayotte","Indian/Reunion","Mexico/BajaNorte","Mexico/BajaSur","Mexico/General","Pacific/Apia","Pacific/Auckland","Pacific/Bougainville","Pacific/Chatham","Pacific/Chuuk","Pacific/Easter","Pacific/Efate","Pacific/Enderbury","Pacific/Fakaofo","Pacific/Fiji","Pacific/Funafuti","Pacific/Galapagos","Pacific/Gambier","Pacific/Guadalcanal","Pacific/Guam","Pacific/Honolulu","Pacific/Johnston","Pacific/Kanton","Pacific/Kiritimati","Pacific/Kosrae","Pacific/Kwajalein","Pacific/Majuro","Pacific/Marquesas","Pacific/Midway","Pacific/Nauru","Pacific/Niue","Pacific/Norfolk","Pacific/Noumea","Pacific/Pago_Pago","Pacific/Palau","Pacific/Pitcairn","Pacific/Pohnpei","Pacific/Ponape","Pacific/Port_Moresby","Pacific/Rarotonga","Pacific/Saipan","Pacific/Samoa","Pacific/Tahiti","Pacific/Tarawa","Pacific/Tongatapu","Pacific/Truk","Pacific/Wake","Pacific/Wallis","Pacific/Yap","US/Alaska","US/Aleutian","US/Arizona","US/Central","US/East-Indiana","US/Eastern","US/Hawaii","US/Indiana-Starke","US/Michigan","US/Mountain","US/Pacific","US/Samoa"];
@@ -949,7 +1080,7 @@
         .chip {justify-content:space-between;border-radius:7px;background:#f1f4f8;padding:4px 6px;}
         .chip span {flex:1;overflow-wrap:anywhere;}
         .status {margin-top:11px;padding:9px;border-radius:9px;background:#f0f4f9;
-          color:#32435d;font-size:12px;overflow-wrap:anywhere;}
+          color:#32435d;font-size:12px;overflow-wrap:anywhere;white-space:pre-line;}
         .status.ok {background:#eaf7ef;color:#17613c;}
         .status.warning {background:#fff2d7;color:#78520e;}
         .status.leak,.status.error {background:#fce8e9;color:#a22127;}
@@ -1026,13 +1157,13 @@
         </div>
         <div class="section">
           <div class="setting"><span class="label">Automatic WebRTC Leak Check</span><input id="rtcOn" type="checkbox" aria-label="Enable automatic WebRTC leak check"></div>
-          <div class="sub">Checks on every visit using external STUN servers and api.ipify.org. The button turns red on an observed leak. Checks do not block WebRTC traffic.</div>
+          <div class="sub">Compares public IPv4 ICE candidates against HTTP exit IP using external STUN and api.ipify.org. Private LAN and mDNS addresses are ignored; no public candidate is a limited result, not a leak. Checks do not block WebRTC or verify IPv6.</div>
           <div class="status" id="rtcStatus"></div>
           <button id="rtcRetry" class="tiny" type="button">Check again</button>
         </div>
         <div class="section">
-          <div class="setting"><span class="label">IP / Region / Timezone Consistency</span><input id="ipConsistencyOn" type="checkbox" aria-label="Enable IP country consistency checks"></div>
-          <div class="sub">Uses ipapi.co to check approximate HTTP exit-IP location on each visit. A mismatch is a warning, not proof of a leak. IP lookup sends your public IP to that service.</div>
+          <div class="setting"><span class="label">Full Environment Consistency</span><input id="ipConsistencyOn" type="checkbox" aria-label="Enable full environment consistency checks"></div>
+          <div class="sub">Cross-checks all accessible signals: primary and secondary browser languages, Intl date/number locales, selected region, timezone, Date UTC offset, HTTP exit IP and WebRTC. Other languages can legitimately have different regions. IP lookup uses ipapi.co; mismatches are warnings, not proof of a leak.</div>
           <div class="status" id="consistencyStatus"></div>
           <button id="consistencyRetry" class="tiny" type="button">Check again</button>
         </div>
@@ -1153,6 +1284,7 @@
       const result = commit(key, value, reload);
       message(result.info, !result.ok);
       syncControls();
+      if (prefs.ipConsistency) runConsistencyCheck();
       return result.ok;
     }
     function renderRtc() {
@@ -1166,9 +1298,10 @@
         default: label = 'TZ ✓';
       }
       if (regionWarning && rtcState.state !== 'leak') label = '⚠ TZ !';
+      if (rtcState.state === 'limited' && !regionWarning) label = 'TZ ·';
       fab.textContent = label;
       fab.className = `fab ${rtcState.state === 'leak' ? 'leak' : regionWarning ? 'consistency' : rtcState.state === 'unknown' ? 'unknown' : rtcState.state === 'off' ? 'off' : ''}`;
-      $('rtcStatus').className = `status ${rtcState.state === 'leak' ? 'leak' : rtcState.state === 'safe' ? 'ok' : rtcState.state === 'off' ? '' : 'warning'}`;
+      $('rtcStatus').className = `status ${rtcState.state === 'leak' ? 'leak' : rtcState.state === 'safe' ? 'ok' : (rtcState.state === 'off' || rtcState.state === 'limited') ? '' : 'warning'}`;
       $('rtcStatus').textContent = `${rtcState.state.toUpperCase()}: ${rtcState.details}`;
     }
     subscribers.add(renderRtc);
