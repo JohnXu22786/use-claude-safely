@@ -585,7 +585,7 @@
       restoredMessage = `Verification failed for ${failed.join(', ')}. Previous values restored. Reload manually to restore page behavior.`;
       GM_setValue(NOTICE_KEY, restoredMessage);
     } else {
-      restoredMessage = 'Settings applied and verified.';
+      restoredMessage = 'Saved settings passed JavaScript checks after reload.';
     }
     GM_setValue(PENDING_KEY, null);
   }
@@ -627,7 +627,7 @@
       return { ok: false, info: 'Verification failed. The switch has returned to its previous state.' };
     }
     persist();
-    return { ok: true, info: 'Saved and verified.' };
+    return { ok: true, info: 'Setting passed its JavaScript check.' };
   }
 
   const rtcState = { state: 'checking', details: 'Starting external WebRTC check...' };
@@ -816,6 +816,13 @@
         .status.ok {background:#eaf7ef;color:#17613c;}
         .status.warning {background:#fff2d7;color:#78520e;}
         .status.leak,.status.error {background:#fce8e9;color:#a22127;}
+        /* Separate from the scrolling panel: alerts always float at its visible bottom. */
+        .toast {position:fixed;z-index:10;pointer-events:none;margin:0;padding:10px 12px;
+          max-height:120px;overflow:hidden;overflow-wrap:anywhere;border-radius:9px;
+          border:1px solid #b3dfc3;background:#eaf7ef;color:#17613c;
+          box-shadow:0 5px 20px #0005;font:600 12px/1.45 system-ui,Arial,sans-serif;
+          text-align:center;}
+        .toast.error {background:#fce8e9;border-color:#edabb0;color:#a22127;}
         .count {padding:4px;color:#69788c;font-size:11px;}
         [hidden] {display:none!important;}
         @media (prefers-color-scheme:dark) {
@@ -832,6 +839,8 @@
           .status.ok {background:#164a34;color:#b5f3d0;}
           .status.warning {background:#564018;color:#ffe3a1;}
           .status.leak,.status.error {background:#591f28;color:#ffc2c8;}
+          .toast {background:#164a34;border-color:#34775a;color:#b5f3d0;}
+          .toast.error {background:#591f28;border-color:#a44350;color:#ffc2c8;}
         }
       </style>
       <button id="fab" class="fab" type="button" aria-label="Environment Manager; drag to move">TZ ⚙</button>
@@ -871,9 +880,9 @@
           <div class="status" id="rtcStatus"></div>
           <button id="rtcRetry" class="tiny" type="button">Check again</button>
         </div>
-        <div class="status" id="message" aria-live="polite" hidden></div>
         <div class="actionrow" style="margin-top:12px;justify-content:flex-end"><button id="reset" type="button">Reset to defaults</button></div>
       </section>
+      <div class="toast" id="message" role="status" aria-live="polite" hidden></div>
     `;
     const $ = name => shadow.getElementById(name);
     const fab = $('fab');
@@ -905,6 +914,14 @@
       const h = panel.getBoundingClientRect().height;
       panel.style.top = `${bound(showBelow ? rect.bottom + 8 : rect.top - 8 - h,
         EDGE, Math.max(EDGE, b.height - EDGE - h))}px`;
+      const toast = $('message');
+      if (!toast.hidden) {
+        const popup = panel.getBoundingClientRect();
+        toast.style.width = `${Math.max(50, popup.width - 24)}px`;
+        toast.style.left = `${popup.left + 12}px`;
+        toast.style.top = `${Math.max(popup.top + 8,
+          popup.bottom - toast.offsetHeight - 12)}px`;
+      }
     }
     function applyPosition() {
       const b = bounds();
@@ -957,11 +974,24 @@
       });
     }
 
+    let messageTimer = null;
+    function clearMessage() {
+      if (messageTimer !== null) page.clearTimeout(messageTimer);
+      messageTimer = null;
+      $('message').hidden = true;
+    }
     function message(info, isError = false) {
-      $('message').hidden = false;
-      $('message').className = `status ${isError ? 'error' : 'ok'}`;
-      $('message').textContent = info;
+      clearMessage();
+      const toast = $('message');
+      toast.className = `toast${isError ? ' error' : ''}`;
+      toast.textContent = info;
+      if (panel.hidden) showPanel();
+      toast.hidden = false;
       layout();
+      messageTimer = page.setTimeout(() => {
+        toast.hidden = true;
+        messageTimer = null;
+      }, isError ? 4800 : 3200);
     }
     function setting(key, value, reload) {
       const result = commit(key, value, reload);
@@ -1139,13 +1169,14 @@
       panel.hidden = false;
       syncControls(); tzResults(); langResults(); layout();
     };
+    function closePanel() { clearMessage(); panel.hidden = true; }
     fab.addEventListener('click', () => {
       if (performance.now() - lastDragEnded < 400) return;
       if (panel.hidden) showPanel();
-      else panel.hidden = true;
+      else closePanel();
     });
-    $('close').addEventListener('click', () => { panel.hidden = true; });
-    page.addEventListener('keydown',e => { if (e.key === 'Escape' && !panel.hidden) panel.hidden = true; });
+    $('close').addEventListener('click', closePanel);
+    page.addEventListener('keydown',e => { if (e.key === 'Escape' && !panel.hidden) closePanel(); });
     document.body.appendChild(host);
     applyPosition();
     syncControls();
