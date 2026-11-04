@@ -1,41 +1,67 @@
 # Use Claude Safely
 
-A browser-side environment management userscript for Claude/Anthropic sites and selected webmail interfaces. It provides configurable timezone, language and region preferences, best-effort Chinese font detection mitigation, WebRTC/network checks, and visible consistency notices.
+A browser-side environment management userscript for Claude/Anthropic sites and selected webmail interfaces.
 
-> This is a browser environment utility, **not** an account-safety guarantee. It does not change your actual IP address, TLS fingerprint, server-side region checks, or a service's terms and eligibility requirements.
+**Current version: v0.3.2**
 
-## Install
+This is an environment utility, not an account-safety guarantee. It does not change your actual IP address, TLS fingerprint, server-side region checks, or a service's terms and eligibility requirements.
 
-1. Install a trusted userscript manager such as Tampermonkey.
-2. Open [browser-environment-guard.user.js](./browser-environment-guard.user.js), copy the script into a new userscript, and save it.
-3. Open a supported website and use the draggable **ENV** control. Settings are persisted by the userscript manager and shared across covered domains.
-4. Disable older copies of the script so that multiple instances do not override one another.
+## Installation
+
+1. Install a userscript manager such as Tampermonkey or Violentmonkey.
+2. Open the [v0.3.2 userscript](https://raw.githubusercontent.com/JohnXu22786/use-claude-safely/v0.3.2/browser-environment-guard.user.js) and approve the manager's installation prompt.
+3. Visit a supported website and open the draggable **ENV** control to configure preferences.
+4. Disable older copies of this script to prevent multiple instances from overriding one another.
 
 ## Features
 
-- Search the browser's supported IANA timezones, with aliases, offsets and city/country suggestions.
-- Override page-visible timezone, browser language preferences, Intl locale and chosen region where supported.
-- Optionally match common language tags to their usual regions without forcing all languages to match the IP country.
-- Reduce exposure through some common Chinese font detection interfaces. Native rendering and all fingerprinting surfaces cannot be covered.
-- Check IP-geolocation and WebRTC candidates using multiple providers. Private LAN addresses alone are not treated as public-IP leaks; failed or timed-out checks stay inconclusive.
-- Keep the primary alert focused on IP/timezone/region differences and unexpected non-Chinese `-CN` tags.
-- Expand **Other signals** to see potential HTTP Accept-Language/JavaScript differences and remaining testing blind spots.
-- Keep the settings button draggable and preserve preferences across browser restarts.
+- Search supported IANA timezones using aliases, UTC offsets, and city or country names.
+- Configure page-visible timezone, browser language preferences, `Intl` locale, and region where supported.
+- Optionally match common language tags with their usual regions.
+- Apply best-effort mitigation for some Chinese font-detection interfaces.
+- Check IP geolocation and WebRTC candidates through multiple providers.
+- Show focused consistency notices and separate additional signals and coverage notes.
+- Drag the **ENV** control and persist preferences through the userscript manager.
 
-## Domains and network requests
+## Supported websites
 
-The userscript matches Claude/Anthropic hosts plus selected webmail sites (including Gmail, Outlook, Yahoo Mail, iCloud Mail, Proton Mail and others). The exact list is in the userscript's `@match` metadata.
+The userscript runs on the following hosts, as defined by its `@match` metadata:
 
-Some optional checks request online timezone mapping data or contact third-party IP, geolocation and header-echo providers. These services may see the network address used for the request. Review the source and switch off unneeded network checks.
+- Claude and Anthropic: `claude.ai`, `claude.com`, `anthropic.com`, and `claudeusercontent.com` (including their subdomains where matched).
+- Email: Gmail, Outlook, Yahoo Mail, iCloud Mail, Proton Mail, Tuta, Fastmail, Zoho Mail, AOL Mail, GMX, HEY, Yandex Mail, QQ Mail, NetEase Mail (`163.com`, `126.com`, `yeah.net`), Sina Mail, and Naver Mail.
 
-## Limitations
+## Network requests
 
-- Userscripts cannot guarantee running before every site script, worker or frame.
-- JavaScript-level changes do **not** automatically modify HTTP `Accept-Language`, TLS/JA3/JA4, native font rendering or all WebRTC behavior.
-- The HTTP header echo is a request to another service, not a direct read of the exact headers received by Claude or a mail provider.
-- A missing mismatch is not proof of anonymity or compliance with service requirements.
-- Test functionality on your browser: some websites or browser security policies can limit injection and cross-origin requests.
+Optional checks may request timezone mapping data or contact third-party IP, geolocation, and header-echo providers. Those services may see the network address used for the request. Review the source and disable checks you do not need.
 
-## Development workflow
+## Known limitations
 
-The original timezone script was committed directly to `main`. Subsequent milestones are preserved as separate, merged pull requests in the repository's history. There are no copied version-numbered script files. Release tags, a public version scheme, and an open-source license have not yet been selected.
+- Userscripts cannot guarantee execution before every site script, worker, or frame.
+- JavaScript changes do not automatically change HTTP `Accept-Language`, TLS/JA3/JA4, native font rendering, or every WebRTC surface.
+- The header-echo check contacts another service; it does not read the exact headers received by Claude or a mail provider.
+- A missing mismatch does not prove anonymity, account safety, or compliance with a service's requirements.
+- Browser security policies and site changes may limit script injection or cross-origin requests.
+
+## Releases and versioning
+
+The project remains in the `0.x` series. Minor versions mark major feature milestones or significant functional expansion. Patch versions cover bug fixes, UI and search improvements, compatibility fixes, performance work, small additions, and documentation. Patch versions are preferred when a minor bump is not warranted.
+
+The release tags are attached to their historical commits. Historical releases are retrospective and do not imply that GitHub published them on those past dates.
+
+| Version | Release |
+| --- | --- |
+| v0.3.2 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.3.2) |
+| v0.3.1 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.3.1) |
+| v0.3.0 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.3.0) |
+| v0.2.6 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.6) |
+| v0.2.5 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.5) |
+| v0.2.4 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.4) |
+| v0.2.3 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.3) |
+| v0.2.2 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.2) |
+| v0.2.1 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.1) |
+| v0.2.0 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.0) |
+| v0.1.2 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.1.2) |
+| v0.1.1 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.1.1) |
+| v0.1.0 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.1.0) |
+
+See [CHANGELOG.md](./CHANGELOG.md) for the milestone summaries.
