@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude / Anthropic - Environment Manager
 // @namespace    https://userscripts.local/claude-anthropic-timezone
-// @description  Persistent time zone, browser languages, default Intl locale, Chinese font privacy, and automatic WebRTC leak checks. Draggable control; no unapproved reloads.
+// @description  Persistent timezone, region, matched browser languages, Intl locale, font privacy, and network consistency warnings. Draggable control; no unapproved reloads.
 // @match        https://claude.ai/*
 // @match        https://*.claude.ai/*
 // @match        https://claude.com/*
@@ -19,6 +19,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_addValueChangeListener
 // @connect      api.ipify.org
+// @connect      ipapi.co
 // ==/UserScript==
 
 (() => {
@@ -35,9 +36,14 @@
   const systemZone = new NativeDTF().resolvedOptions().timeZone || 'UTC';
   const originalLanguages = [...(page.navigator.languages || [page.navigator.language || 'en-US'])];
   const originalLocale = new NativeDTF().resolvedOptions().locale || 'en-US';
+  const nativeLocaleCtor = page.Intl.Locale;
   const defaultConfig = Object.freeze({
     timezone: SYSTEM,
     languageEnabled: false,
+    matchLanguageRegions: true,
+    regionEnabled: false,
+    region: 'US',
+    ipConsistency: true,
     languages: originalLanguages.length ? originalLanguages : ['en-US'],
     localeEnabled: false,
     locale: originalLocale,
@@ -68,12 +74,59 @@
     }
     return values.length ? values : null;
   }
+
+  // ISO 3166-1 codes; English labels rendered by Intl.DisplayNames when available.
+  const countryTable = [["AD","Andorra"],["AE","United Arab Emirates"],["AF","Afghanistan"],["AG","Antigua and Barbuda"],["AI","Anguilla"],["AL","Albania"],["AM","Armenia"],["AO","Angola"],["AQ","Antarctica"],["AR","Argentina"],["AS","American Samoa"],["AT","Austria"],["AU","Australia"],["AW","Aruba"],["AX","Åland Islands"],["AZ","Azerbaijan"],["BA","Bosnia and Herzegovina"],["BB","Barbados"],["BD","Bangladesh"],["BE","Belgium"],["BF","Burkina Faso"],["BG","Bulgaria"],["BH","Bahrain"],["BI","Burundi"],["BJ","Benin"],["BL","Saint Barthélemy"],["BM","Bermuda"],["BN","Brunei Darussalam"],["BO","Bolivia, Plurinational State of"],["BQ","Bonaire, Sint Eustatius and Saba"],["BR","Brazil"],["BS","Bahamas"],["BT","Bhutan"],["BV","Bouvet Island"],["BW","Botswana"],["BY","Belarus"],["BZ","Belize"],["CA","Canada"],["CC","Cocos (Keeling) Islands"],["CD","Congo, The Democratic Republic of the"],["CF","Central African Republic"],["CG","Congo"],["CH","Switzerland"],["CI","Côte d'Ivoire"],["CK","Cook Islands"],["CL","Chile"],["CM","Cameroon"],["CN","China"],["CO","Colombia"],["CR","Costa Rica"],["CU","Cuba"],["CV","Cabo Verde"],["CW","Curaçao"],["CX","Christmas Island"],["CY","Cyprus"],["CZ","Czechia"],["DE","Germany"],["DJ","Djibouti"],["DK","Denmark"],["DM","Dominica"],["DO","Dominican Republic"],["DZ","Algeria"],["EC","Ecuador"],["EE","Estonia"],["EG","Egypt"],["EH","Western Sahara"],["ER","Eritrea"],["ES","Spain"],["ET","Ethiopia"],["FI","Finland"],["FJ","Fiji"],["FK","Falkland Islands (Malvinas)"],["FM","Micronesia, Federated States of"],["FO","Faroe Islands"],["FR","France"],["GA","Gabon"],["GB","United Kingdom"],["GD","Grenada"],["GE","Georgia"],["GF","French Guiana"],["GG","Guernsey"],["GH","Ghana"],["GI","Gibraltar"],["GL","Greenland"],["GM","Gambia"],["GN","Guinea"],["GP","Guadeloupe"],["GQ","Equatorial Guinea"],["GR","Greece"],["GS","South Georgia and the South Sandwich Islands"],["GT","Guatemala"],["GU","Guam"],["GW","Guinea-Bissau"],["GY","Guyana"],["HK","Hong Kong"],["HM","Heard Island and McDonald Islands"],["HN","Honduras"],["HR","Croatia"],["HT","Haiti"],["HU","Hungary"],["ID","Indonesia"],["IE","Ireland"],["IL","Israel"],["IM","Isle of Man"],["IN","India"],["IO","British Indian Ocean Territory"],["IQ","Iraq"],["IR","Iran, Islamic Republic of"],["IS","Iceland"],["IT","Italy"],["JE","Jersey"],["JM","Jamaica"],["JO","Jordan"],["JP","Japan"],["KE","Kenya"],["KG","Kyrgyzstan"],["KH","Cambodia"],["KI","Kiribati"],["KM","Comoros"],["KN","Saint Kitts and Nevis"],["KP","Korea, Democratic People's Republic of"],["KR","Korea, Republic of"],["KW","Kuwait"],["KY","Cayman Islands"],["KZ","Kazakhstan"],["LA","Lao People's Democratic Republic"],["LB","Lebanon"],["LC","Saint Lucia"],["LI","Liechtenstein"],["LK","Sri Lanka"],["LR","Liberia"],["LS","Lesotho"],["LT","Lithuania"],["LU","Luxembourg"],["LV","Latvia"],["LY","Libya"],["MA","Morocco"],["MC","Monaco"],["MD","Moldova, Republic of"],["ME","Montenegro"],["MF","Saint Martin (French part)"],["MG","Madagascar"],["MH","Marshall Islands"],["MK","North Macedonia"],["ML","Mali"],["MM","Myanmar"],["MN","Mongolia"],["MO","Macao"],["MP","Northern Mariana Islands"],["MQ","Martinique"],["MR","Mauritania"],["MS","Montserrat"],["MT","Malta"],["MU","Mauritius"],["MV","Maldives"],["MW","Malawi"],["MX","Mexico"],["MY","Malaysia"],["MZ","Mozambique"],["NA","Namibia"],["NC","New Caledonia"],["NE","Niger"],["NF","Norfolk Island"],["NG","Nigeria"],["NI","Nicaragua"],["NL","Netherlands"],["NO","Norway"],["NP","Nepal"],["NR","Nauru"],["NU","Niue"],["NZ","New Zealand"],["OM","Oman"],["PA","Panama"],["PE","Peru"],["PF","French Polynesia"],["PG","Papua New Guinea"],["PH","Philippines"],["PK","Pakistan"],["PL","Poland"],["PM","Saint Pierre and Miquelon"],["PN","Pitcairn"],["PR","Puerto Rico"],["PS","Palestine, State of"],["PT","Portugal"],["PW","Palau"],["PY","Paraguay"],["QA","Qatar"],["RE","Réunion"],["RO","Romania"],["RS","Serbia"],["RU","Russian Federation"],["RW","Rwanda"],["SA","Saudi Arabia"],["SB","Solomon Islands"],["SC","Seychelles"],["SD","Sudan"],["SE","Sweden"],["SG","Singapore"],["SH","Saint Helena, Ascension and Tristan da Cunha"],["SI","Slovenia"],["SJ","Svalbard and Jan Mayen"],["SK","Slovakia"],["SL","Sierra Leone"],["SM","San Marino"],["SN","Senegal"],["SO","Somalia"],["SR","Suriname"],["SS","South Sudan"],["ST","Sao Tome and Principe"],["SV","El Salvador"],["SX","Sint Maarten (Dutch part)"],["SY","Syrian Arab Republic"],["SZ","Eswatini"],["TC","Turks and Caicos Islands"],["TD","Chad"],["TF","French Southern Territories"],["TG","Togo"],["TH","Thailand"],["TJ","Tajikistan"],["TK","Tokelau"],["TL","Timor-Leste"],["TM","Turkmenistan"],["TN","Tunisia"],["TO","Tonga"],["TR","Türkiye"],["TT","Trinidad and Tobago"],["TV","Tuvalu"],["TW","Taiwan, Province of China"],["TZ","Tanzania, United Republic of"],["UA","Ukraine"],["UG","Uganda"],["UM","United States Minor Outlying Islands"],["US","United States"],["UY","Uruguay"],["UZ","Uzbekistan"],["VA","Holy See (Vatican City State)"],["VC","Saint Vincent and the Grenadines"],["VE","Venezuela, Bolivarian Republic of"],["VG","Virgin Islands, British"],["VI","Virgin Islands, U.S."],["VN","Viet Nam"],["VU","Vanuatu"],["WF","Wallis and Futuna"],["WS","Samoa"],["YE","Yemen"],["YT","Mayotte"],["ZA","South Africa"],["ZM","Zambia"],["ZW","Zimbabwe"]];
+  const countries = (() => {
+    const names = typeof page.Intl.DisplayNames === 'function'
+      ? new page.Intl.DisplayNames(['en'], {type:'region'}) : null;
+    return countryTable.map(([code,name]) => ({code, label:`${names?.of(code) || name} (${code})`}))
+      .sort((a,b) => a.label.localeCompare(b.label, 'en'));
+  })();
+  const validRegions = new Set(countryTable.map(entry => entry[0]));
+  function validRegion(value) {
+    if (typeof value !== 'string') return null;
+    const v = value.trim();
+    const c = v.toUpperCase();
+    if (validRegions.has(c)) return c;
+    const hit = countries.find(item => item.label.toLowerCase() === v.toLowerCase() ||
+      item.label.replace(/\s*\([A-Z]{2}\)$/, '').toLowerCase() === v.toLowerCase());
+    return hit?.code || null;
+  }
+  // A language's most likely region comes from the browser's own CLDR data.
+  // Explicit custom language lists always win over this automatic normalization.
+  function matchLanguageRegion(tag) {
+    try {
+      const loc = new nativeLocaleCtor(tag);
+      if (!loc.region) return loc.toString();
+      const guessed = new nativeLocaleCtor(loc.language + (loc.script ? `-${loc.script}` : '')).maximize().region;
+      return guessed && validRegions.has(guessed) ? new nativeLocaleCtor(tag, {region:guessed}).toString() : loc.toString();
+    } catch { return tag; }
+  }
+  function effectiveLanguages(config) {
+    const input = config.languageEnabled ? config.languages : originalLanguages;
+    const source = !config.languageEnabled && config.matchLanguageRegions
+      ? input.map(matchLanguageRegion) : input;
+    return [...new Set(source)];
+  }
+  function effectiveLocale(config) {
+    let value = config.localeEnabled ? config.locale : originalLocale;
+    if (config.regionEnabled) {
+      try { value = new nativeLocaleCtor(value, { region:config.region }).toString(); }
+      catch { /* Verification will not claim that the region is masked. */ }
+    }
+    return value;
+  }
   function sanitize(raw) {
     const oldTimezone = GM_getValue(LEGACY_TZ_KEY, SYSTEM);
     const input = raw && typeof raw === 'object' ? raw : {};
     return {
       timezone: validZone(input.timezone || oldTimezone) || SYSTEM,
       languageEnabled: input.languageEnabled === true,
+      matchLanguageRegions: input.matchLanguageRegions !== false,
+      regionEnabled: input.regionEnabled === true,
+      region: validRegion(input.region) || 'US',
+      ipConsistency: input.ipConsistency !== false,
       languages: validLanguages(input.languages) || defaultConfig.languages.slice(),
       localeEnabled: input.localeEnabled === true,
       locale: validLanguage(input.locale) || originalLocale,
@@ -90,23 +143,35 @@
 
 
   function installLanguageOverride() {
-    if (!applied.languageEnabled) return;
-    const languages = Object.freeze([...applied.languages]);
+    if (!applied.languageEnabled && !applied.matchLanguageRegions) return;
+    const languages = Object.freeze(effectiveLanguages(applied));
     try {
       Object.defineProperty(page.navigator, 'language', { configurable: true, get: () => languages[0] });
       Object.defineProperty(page.navigator, 'languages', { configurable: true, get: () => [...languages] });
     } catch { /* Verification will trigger a settings rollback. */ }
   }
   function installLocaleOverride() {
-    if (!applied.localeEnabled) return;
-    const locale = applied.locale;
+    if (!applied.localeEnabled && !applied.regionEnabled) return;
+    const locale = effectiveLocale(applied);
     const constructors = ['DateTimeFormat', 'NumberFormat', 'Collator', 'PluralRules',
       'RelativeTimeFormat', 'ListFormat', 'DisplayNames', 'Segmenter'];
     for (const key of constructors) {
       const Native = page.Intl[key];
       if (typeof Native !== 'function') continue;
       function Localized(locales, options) {
-        return new Native(locales == null ? locale : locales, options);
+        const useDefault = locales == null;
+        const instance = new Native(useDefault ? locale : locales, options);
+        // Some engines collapse an unfamiliar language/region pair (en-JP -> en).
+        // Preserve the selected region on default-locale resolvedOptions, while
+        // leaving explicit locale arguments and native formatting untouched.
+        if (useDefault && applied.regionEnabled && typeof instance.resolvedOptions === 'function') {
+          const originalResolved = instance.resolvedOptions.bind(instance);
+          Object.defineProperty(instance, 'resolvedOptions', {
+            configurable:true,
+            value:() => ({...originalResolved(),locale}),
+          });
+        }
+        return instance;
       }
       Object.setPrototypeOf(Localized, Native);
       Localized.prototype = Native.prototype;
@@ -512,7 +577,8 @@
           if (type !== 'time') Object.assign(opts, { year: 'numeric', month: 'numeric', day: 'numeric' });
           if (type !== 'date') Object.assign(opts, { hour: 'numeric', minute: 'numeric', second: 'numeric' });
         }
-        return new NativeDTF(locales, opts).format(this);
+        const defaultLocale = (applied.localeEnabled || applied.regionEnabled) ? effectiveLocale(applied) : locales;
+        return new NativeDTF(locales == null ? defaultLocale : locales, opts).format(this);
       };
     }
 
@@ -547,14 +613,22 @@
             sample.getDate() === p.day && sample.getHours() === p.hour;
         }
         case 'languageEnabled':
-        case 'languages':
-          return !applied.languageEnabled || (
-            page.navigator.language === applied.languages[0] &&
-            JSON.stringify([...page.navigator.languages]) === JSON.stringify(applied.languages));
+        case 'matchLanguageRegions':
+        case 'languages': {
+          if (!applied.languageEnabled && !applied.matchLanguageRegions) return true;
+          const expected = effectiveLanguages(applied);
+          return page.navigator.language === expected[0] &&
+            JSON.stringify([...page.navigator.languages]) === JSON.stringify(expected);
+        }
         case 'localeEnabled':
         case 'locale':
-          return !applied.localeEnabled || new page.Intl.DateTimeFormat().resolvedOptions().locale ===
-            new NativeDTF(applied.locale).resolvedOptions().locale;
+        case 'regionEnabled':
+        case 'region':
+          return (!applied.localeEnabled && !applied.regionEnabled) ||
+            new page.Intl.DateTimeFormat().resolvedOptions().locale ===
+            (applied.regionEnabled ? effectiveLocale(applied) :
+              new NativeDTF(effectiveLocale(applied)).resolvedOptions().locale);
+        case 'ipConsistency': return true;
         case 'fonts': {
           if (!applied.fonts) return true;
           const canvas = page.document.createElement('canvas');
@@ -717,7 +791,7 @@
       if (mismatched?.length) {
         updateRtc('leak', `WebRTC exposed ${mismatched.join(', ')}, different from the HTTP exit IP ${publicIp}.`);
       } else if (rawLocal.length) {
-        updateRtc('leak', 'WebRTC exposed an unmasked local IPv4 address to the page.');
+        updateRtc('unknown', 'WebRTC exposed a local LAN IPv4 address; this alone is not a public-IP leak.');
       } else if (!publicIp) {
         updateRtc('unknown', 'The public IP check did not finish; no reliable comparison is possible.');
       } else if (result.error || !result.candidates.length) {
@@ -727,6 +801,69 @@
       }
     })().catch(err => updateRtc('unknown', `Check could not complete: ${err.message}`)).finally(() => { rtcRunning = null; });
     return rtcRunning;
+  }
+
+
+  // Informational exit-IP geolocation. This does not change the IP address.
+  const consistencyState = { state:'checking', details:'Checking selected region, timezone and HTTP exit location...' };
+  const consistencyListeners = new Set();
+  function updateConsistency(state, details) {
+    consistencyState.state = state;
+    consistencyState.details = details;
+    for (const cb of consistencyListeners) { try { cb(); } catch {} }
+  }
+  function geoLookup() {
+    return new Promise(resolve => {
+      if (typeof GM_xmlhttpRequest !== 'function') return resolve(null);
+      try {
+        GM_xmlhttpRequest({
+          method:'GET', url:'https://ipapi.co/json/', timeout:7000,
+          onload: response => {
+            try {
+              if (response.status !== 200) return resolve(null);
+              const d=JSON.parse(response.responseText);
+              if (d.error || !validRegion(d.country_code || d.country)) return resolve(null);
+              resolve({ip:String(d.ip || ''),region:validRegion(d.country_code || d.country),
+                timezone:validZone(d.timezone) || null});
+            } catch { resolve(null); }
+          },
+          onerror:()=>resolve(null),ontimeout:()=>resolve(null),
+        });
+      } catch { resolve(null); }
+    });
+  }
+  // IANA zones used by a country, including zones with shared offsets.
+  const zoneCountries = {"Europe/Andorra":["AD"],"Asia/Dubai":["AE","OM","RE","SC","TF"],"Asia/Kabul":["AF"],"America/Antigua":["AG"],"America/Anguilla":["AI"],"Europe/Tirane":["AL"],"Asia/Yerevan":["AM"],"Africa/Luanda":["AO"],"Antarctica/McMurdo":["AQ"],"Antarctica/Casey":["AQ"],"Antarctica/Davis":["AQ"],"Antarctica/DumontDUrville":["AQ"],"Antarctica/Mawson":["AQ"],"Antarctica/Palmer":["AQ"],"Antarctica/Rothera":["AQ"],"Antarctica/Syowa":["AQ"],"Antarctica/Troll":["AQ"],"Antarctica/Vostok":["AQ"],"America/Argentina/Buenos_Aires":["AR"],"America/Argentina/Cordoba":["AR"],"America/Argentina/Salta":["AR"],"America/Argentina/Jujuy":["AR"],"America/Argentina/Tucuman":["AR"],"America/Argentina/Catamarca":["AR"],"America/Argentina/La_Rioja":["AR"],"America/Argentina/San_Juan":["AR"],"America/Argentina/Mendoza":["AR"],"America/Argentina/San_Luis":["AR"],"America/Argentina/Rio_Gallegos":["AR"],"America/Argentina/Ushuaia":["AR"],"Pacific/Pago_Pago":["AS","UM"],"Europe/Vienna":["AT"],"Australia/Lord_Howe":["AU"],"Antarctica/Macquarie":["AU"],"Australia/Hobart":["AU"],"Australia/Melbourne":["AU"],"Australia/Sydney":["AU"],"Australia/Broken_Hill":["AU"],"Australia/Brisbane":["AU"],"Australia/Lindeman":["AU"],"Australia/Adelaide":["AU"],"Australia/Darwin":["AU"],"Australia/Perth":["AU"],"Australia/Eucla":["AU"],"America/Aruba":["AW"],"Europe/Mariehamn":["AX"],"Asia/Baku":["AZ"],"Europe/Sarajevo":["BA"],"America/Barbados":["BB"],"Asia/Dhaka":["BD"],"Europe/Brussels":["BE","LU","NL"],"Africa/Ouagadougou":["BF"],"Europe/Sofia":["BG"],"Asia/Bahrain":["BH"],"Africa/Bujumbura":["BI"],"Africa/Porto-Novo":["BJ"],"America/St_Barthelemy":["BL"],"Atlantic/Bermuda":["BM"],"Asia/Brunei":["BN"],"America/La_Paz":["BO"],"America/Kralendijk":["BQ"],"America/Noronha":["BR"],"America/Belem":["BR"],"America/Fortaleza":["BR"],"America/Recife":["BR"],"America/Araguaina":["BR"],"America/Maceio":["BR"],"America/Bahia":["BR"],"America/Sao_Paulo":["BR"],"America/Campo_Grande":["BR"],"America/Cuiaba":["BR"],"America/Santarem":["BR"],"America/Porto_Velho":["BR"],"America/Boa_Vista":["BR"],"America/Manaus":["BR"],"America/Eirunepe":["BR"],"America/Rio_Branco":["BR"],"America/Nassau":["BS"],"Asia/Thimphu":["BT"],"Africa/Gaborone":["BW"],"Europe/Minsk":["BY"],"America/Belize":["BZ"],"America/St_Johns":["CA"],"America/Halifax":["CA"],"America/Glace_Bay":["CA"],"America/Moncton":["CA"],"America/Goose_Bay":["CA"],"America/Blanc-Sablon":["CA"],"America/Toronto":["BS","CA"],"America/Iqaluit":["CA"],"America/Atikokan":["CA"],"America/Winnipeg":["CA"],"America/Resolute":["CA"],"America/Rankin_Inlet":["CA"],"America/Regina":["CA"],"America/Swift_Current":["CA"],"America/Edmonton":["CA"],"America/Cambridge_Bay":["CA"],"America/Inuvik":["CA"],"America/Creston":["CA"],"America/Dawson_Creek":["CA"],"America/Fort_Nelson":["CA"],"America/Whitehorse":["CA"],"America/Dawson":["CA"],"America/Vancouver":["CA"],"Indian/Cocos":["CC"],"Africa/Kinshasa":["CD"],"Africa/Lubumbashi":["CD"],"Africa/Bangui":["CF"],"Africa/Brazzaville":["CG"],"Europe/Zurich":["CH","DE","LI"],"Africa/Abidjan":["BF","CI","GH","GM","GN","IS","ML","MR","SH","SL","SN","TG"],"Pacific/Rarotonga":["CK"],"America/Santiago":["CL"],"America/Coyhaique":["CL"],"America/Punta_Arenas":["CL"],"Pacific/Easter":["CL"],"Africa/Douala":["CM"],"Asia/Shanghai":["CN"],"Asia/Urumqi":["CN"],"America/Bogota":["CO"],"America/Costa_Rica":["CR"],"America/Havana":["CU"],"Atlantic/Cape_Verde":["CV"],"America/Curacao":["CW"],"Indian/Christmas":["CX"],"Asia/Nicosia":["CY"],"Asia/Famagusta":["CY"],"Europe/Prague":["CZ","SK"],"Europe/Berlin":["DE","DK","NO","SE","SJ"],"Europe/Busingen":["DE"],"Africa/Djibouti":["DJ"],"Europe/Copenhagen":["DK"],"America/Dominica":["DM"],"America/Santo_Domingo":["DO"],"Africa/Algiers":["DZ"],"America/Guayaquil":["EC"],"Pacific/Galapagos":["EC"],"Europe/Tallinn":["EE"],"Africa/Cairo":["EG"],"Africa/El_Aaiun":["EH"],"Africa/Asmara":["ER"],"Europe/Madrid":["ES"],"Africa/Ceuta":["ES"],"Atlantic/Canary":["ES"],"Africa/Addis_Ababa":["ET"],"Europe/Helsinki":["AX","FI"],"Pacific/Fiji":["FJ"],"Atlantic/Stanley":["FK"],"Pacific/Chuuk":["FM"],"Pacific/Pohnpei":["FM"],"Pacific/Kosrae":["FM"],"Atlantic/Faroe":["FO"],"Europe/Paris":["FR","MC"],"Africa/Libreville":["GA"],"Europe/London":["GB","GG","IM","JE"],"America/Grenada":["GD"],"Asia/Tbilisi":["GE"],"America/Cayenne":["GF"],"Europe/Guernsey":["GG"],"Africa/Accra":["GH"],"Europe/Gibraltar":["GI"],"America/Nuuk":["GL"],"America/Danmarkshavn":["GL"],"America/Scoresbysund":["GL"],"America/Thule":["GL"],"Africa/Banjul":["GM"],"Africa/Conakry":["GN"],"America/Guadeloupe":["GP"],"Africa/Malabo":["GQ"],"Europe/Athens":["GR"],"Atlantic/South_Georgia":["GS"],"America/Guatemala":["GT"],"Pacific/Guam":["GU","MP"],"Africa/Bissau":["GW"],"America/Guyana":["GY"],"Asia/Hong_Kong":["HK"],"America/Tegucigalpa":["HN"],"Europe/Zagreb":["HR"],"America/Port-au-Prince":["HT"],"Europe/Budapest":["HU"],"Asia/Jakarta":["ID"],"Asia/Pontianak":["ID"],"Asia/Makassar":["ID"],"Asia/Jayapura":["ID"],"Europe/Dublin":["IE"],"Asia/Jerusalem":["IL"],"Europe/Isle_of_Man":["IM"],"Asia/Kolkata":["IN"],"Indian/Chagos":["IO"],"Asia/Baghdad":["IQ"],"Asia/Tehran":["IR"],"Atlantic/Reykjavik":["IS"],"Europe/Rome":["IT","SM","VA"],"Europe/Jersey":["JE"],"America/Jamaica":["JM"],"Asia/Amman":["JO"],"Asia/Tokyo":["AU","JP"],"Africa/Nairobi":["DJ","ER","ET","KE","KM","MG","SO","TZ","UG","YT"],"Asia/Bishkek":["KG"],"Asia/Phnom_Penh":["KH"],"Pacific/Tarawa":["KI","MH","TV","UM","WF"],"Pacific/Kanton":["KI"],"Pacific/Kiritimati":["KI"],"Indian/Comoro":["KM"],"America/St_Kitts":["KN"],"Asia/Pyongyang":["KP"],"Asia/Seoul":["KR"],"Asia/Kuwait":["KW"],"America/Cayman":["KY"],"Asia/Almaty":["KZ"],"Asia/Qyzylorda":["KZ"],"Asia/Qostanay":["KZ"],"Asia/Aqtobe":["KZ"],"Asia/Aqtau":["KZ"],"Asia/Atyrau":["KZ"],"Asia/Oral":["KZ"],"Asia/Vientiane":["LA"],"Asia/Beirut":["LB"],"America/St_Lucia":["LC"],"Europe/Vaduz":["LI"],"Asia/Colombo":["LK"],"Africa/Monrovia":["LR"],"Africa/Maseru":["LS"],"Europe/Vilnius":["LT"],"Europe/Luxembourg":["LU"],"Europe/Riga":["LV"],"Africa/Tripoli":["LY"],"Africa/Casablanca":["MA"],"Europe/Monaco":["MC"],"Europe/Chisinau":["MD"],"Europe/Podgorica":["ME"],"America/Marigot":["MF"],"Indian/Antananarivo":["MG"],"Pacific/Majuro":["MH"],"Pacific/Kwajalein":["MH"],"Europe/Skopje":["MK"],"Africa/Bamako":["ML"],"Asia/Yangon":["CC","MM"],"Asia/Ulaanbaatar":["MN"],"Asia/Hovd":["MN"],"Asia/Macau":["MO"],"Pacific/Saipan":["MP"],"America/Martinique":["MQ"],"Africa/Nouakchott":["MR"],"America/Montserrat":["MS"],"Europe/Malta":["MT"],"Indian/Mauritius":["MU"],"Indian/Maldives":["MV","TF"],"Africa/Blantyre":["MW"],"America/Mexico_City":["MX"],"America/Cancun":["MX"],"America/Merida":["MX"],"America/Monterrey":["MX"],"America/Matamoros":["MX"],"America/Chihuahua":["MX"],"America/Ciudad_Juarez":["MX"],"America/Ojinaga":["MX"],"America/Mazatlan":["MX"],"America/Bahia_Banderas":["MX"],"America/Hermosillo":["MX"],"America/Tijuana":["MX"],"Asia/Kuala_Lumpur":["MY"],"Asia/Kuching":["BN","MY"],"Africa/Maputo":["BI","BW","CD","MW","MZ","RW","ZM","ZW"],"Africa/Windhoek":["NA"],"Pacific/Noumea":["NC"],"Africa/Niamey":["NE"],"Pacific/Norfolk":["NF"],"Africa/Lagos":["AO","BJ","CD","CF","CG","CM","GA","GQ","NE","NG"],"America/Managua":["NI"],"Europe/Amsterdam":["NL"],"Europe/Oslo":["NO"],"Asia/Kathmandu":["NP"],"Pacific/Nauru":["NR"],"Pacific/Niue":["NU"],"Pacific/Auckland":["AQ","NZ"],"Pacific/Chatham":["NZ"],"Asia/Muscat":["OM"],"America/Panama":["CA","KY","PA"],"America/Lima":["PE"],"Pacific/Tahiti":["PF"],"Pacific/Marquesas":["PF"],"Pacific/Gambier":["PF"],"Pacific/Port_Moresby":["AQ","FM","PG"],"Pacific/Bougainville":["PG"],"Asia/Manila":["PH"],"Asia/Karachi":["PK"],"Europe/Warsaw":["PL"],"America/Miquelon":["PM"],"Pacific/Pitcairn":["PN"],"America/Puerto_Rico":["AG","AI","AW","BL","BQ","CA","CW","DM","GD","GP","KN","LC","MF","MS","PR","SX","TT","VC","VG","VI"],"Asia/Gaza":["PS"],"Asia/Hebron":["PS"],"Europe/Lisbon":["PT"],"Atlantic/Madeira":["PT"],"Atlantic/Azores":["PT"],"Pacific/Palau":["PW"],"America/Asuncion":["PY"],"Asia/Qatar":["BH","QA"],"Indian/Reunion":["RE"],"Europe/Bucharest":["RO"],"Europe/Belgrade":["BA","HR","ME","MK","RS","SI"],"Europe/Kaliningrad":["RU"],"Europe/Moscow":["RU"],"Europe/Simferopol":["RU","UA"],"Europe/Kirov":["RU"],"Europe/Volgograd":["RU"],"Europe/Astrakhan":["RU"],"Europe/Saratov":["RU"],"Europe/Ulyanovsk":["RU"],"Europe/Samara":["RU"],"Asia/Yekaterinburg":["RU"],"Asia/Omsk":["RU"],"Asia/Novosibirsk":["RU"],"Asia/Barnaul":["RU"],"Asia/Tomsk":["RU"],"Asia/Novokuznetsk":["RU"],"Asia/Krasnoyarsk":["RU"],"Asia/Irkutsk":["RU"],"Asia/Chita":["RU"],"Asia/Yakutsk":["RU"],"Asia/Khandyga":["RU"],"Asia/Vladivostok":["RU"],"Asia/Ust-Nera":["RU"],"Asia/Magadan":["RU"],"Asia/Sakhalin":["RU"],"Asia/Srednekolymsk":["RU"],"Asia/Kamchatka":["RU"],"Asia/Anadyr":["RU"],"Africa/Kigali":["RW"],"Asia/Riyadh":["AQ","KW","SA","YE"],"Pacific/Guadalcanal":["FM","SB"],"Indian/Mahe":["SC"],"Africa/Khartoum":["SD"],"Europe/Stockholm":["SE"],"Asia/Singapore":["AQ","MY","SG"],"Atlantic/St_Helena":["SH"],"Europe/Ljubljana":["SI"],"Arctic/Longyearbyen":["SJ"],"Europe/Bratislava":["SK"],"Africa/Freetown":["SL"],"Europe/San_Marino":["SM"],"Africa/Dakar":["SN"],"Africa/Mogadishu":["SO"],"America/Paramaribo":["SR"],"Africa/Juba":["SS"],"Africa/Sao_Tome":["ST"],"America/El_Salvador":["SV"],"America/Lower_Princes":["SX"],"Asia/Damascus":["SY"],"Africa/Mbabane":["SZ"],"America/Grand_Turk":["TC"],"Africa/Ndjamena":["TD"],"Indian/Kerguelen":["TF"],"Africa/Lome":["TG"],"Asia/Bangkok":["CX","KH","LA","TH","VN"],"Asia/Dushanbe":["TJ"],"Pacific/Fakaofo":["TK"],"Asia/Dili":["TL"],"Asia/Ashgabat":["TM"],"Africa/Tunis":["TN"],"Pacific/Tongatapu":["TO"],"Europe/Istanbul":["TR"],"America/Port_of_Spain":["TT"],"Pacific/Funafuti":["TV"],"Asia/Taipei":["TW"],"Africa/Dar_es_Salaam":["TZ"],"Europe/Kyiv":["UA"],"Africa/Kampala":["UG"],"Pacific/Midway":["UM"],"Pacific/Wake":["UM"],"America/New_York":["US"],"America/Detroit":["US"],"America/Kentucky/Louisville":["US"],"America/Kentucky/Monticello":["US"],"America/Indiana/Indianapolis":["US"],"America/Indiana/Vincennes":["US"],"America/Indiana/Winamac":["US"],"America/Indiana/Marengo":["US"],"America/Indiana/Petersburg":["US"],"America/Indiana/Vevay":["US"],"America/Chicago":["US"],"America/Indiana/Tell_City":["US"],"America/Indiana/Knox":["US"],"America/Menominee":["US"],"America/North_Dakota/Center":["US"],"America/North_Dakota/New_Salem":["US"],"America/North_Dakota/Beulah":["US"],"America/Denver":["US"],"America/Boise":["US"],"America/Phoenix":["CA","US"],"America/Los_Angeles":["US"],"America/Anchorage":["US"],"America/Juneau":["US"],"America/Sitka":["US"],"America/Metlakatla":["US"],"America/Yakutat":["US"],"America/Nome":["US"],"America/Adak":["US"],"Pacific/Honolulu":["US"],"America/Montevideo":["UY"],"Asia/Samarkand":["UZ"],"Asia/Tashkent":["UZ"],"Europe/Vatican":["VA"],"America/St_Vincent":["VC"],"America/Caracas":["VE"],"America/Tortola":["VG"],"America/St_Thomas":["VI"],"Asia/Ho_Chi_Minh":["VN"],"Pacific/Efate":["VU"],"Pacific/Wallis":["WF"],"Pacific/Apia":["WS"],"Asia/Aden":["YE"],"Indian/Mayotte":["YT"],"Africa/Johannesburg":["LS","SZ","ZA"],"Africa/Lusaka":["ZM"],"Africa/Harare":["ZW"]};
+  function countriesForZone(input) {
+    if (!input || input === SYSTEM) return [];
+    const clean = validZone(input);
+    if (!clean) return [];
+    return zoneCountries[clean] || zoneCountries[input] || [];
+  }
+  let geoResult = null;
+  async function runConsistencyCheck(redo = false) {
+    if (!prefs.ipConsistency) { updateConsistency('off','Automatic country consistency checks are disabled.'); return; }
+    updateConsistency('checking','Checking approximate public-IP geolocation...');
+    if (redo || !geoResult) geoResult = await geoLookup();
+    if (!prefs.ipConsistency) return updateConsistency('off','Automatic checks are disabled.');
+    if (!geoResult) return updateConsistency('unknown','IP geolocation unavailable. Country and timezone agreement cannot be confirmed.');
+    const parts = [];
+    const targetRegion = prefs.regionEnabled ? prefs.region : null;
+    const targetTimezone = prefs.timezone !== SYSTEM ? prefs.timezone : null;
+    const zoneRegions = countriesForZone(targetTimezone);
+    if (targetRegion && targetRegion !== geoResult.region) {
+      parts.push(`Selected region ${targetRegion} differs from IP country ${geoResult.region}`);
+    }
+    if (targetRegion && zoneRegions.length && !zoneRegions.includes(targetRegion)) {
+      parts.push(`Timezone ${targetTimezone} is not mapped to selected region ${targetRegion}`);
+    }
+    if (targetTimezone && zoneRegions.length && !zoneRegions.includes(geoResult.region)) {
+      parts.push(`Timezone ${targetTimezone} is not mapped to IP country ${geoResult.region}`);
+    }
+    const description = `IP geolocation: ${geoResult.region} (${geoResult.ip || 'IP unavailable'})` +
+      (geoResult.timezone ? `, ${geoResult.timezone}` : '') + '.';
+    if (parts.length) updateConsistency('warning',`${parts.join('; ')}. ${description} These are location differences, not proof of a leak.`);
+    else updateConsistency('ok',`${description} No mapped country conflict observed. This does not verify your actual location or all browser APIs.`);
   }
 
   const fallbackZones = ["Africa/Abidjan","Africa/Accra","Africa/Addis_Ababa","Africa/Algiers","Africa/Asmara","Africa/Asmera","Africa/Bamako","Africa/Bangui","Africa/Banjul","Africa/Bissau","Africa/Blantyre","Africa/Brazzaville","Africa/Bujumbura","Africa/Cairo","Africa/Casablanca","Africa/Ceuta","Africa/Conakry","Africa/Dakar","Africa/Dar_es_Salaam","Africa/Djibouti","Africa/Douala","Africa/El_Aaiun","Africa/Freetown","Africa/Gaborone","Africa/Harare","Africa/Johannesburg","Africa/Juba","Africa/Kampala","Africa/Khartoum","Africa/Kigali","Africa/Kinshasa","Africa/Lagos","Africa/Libreville","Africa/Lome","Africa/Luanda","Africa/Lubumbashi","Africa/Lusaka","Africa/Malabo","Africa/Maputo","Africa/Maseru","Africa/Mbabane","Africa/Mogadishu","Africa/Monrovia","Africa/Nairobi","Africa/Ndjamena","Africa/Niamey","Africa/Nouakchott","Africa/Ouagadougou","Africa/Porto-Novo","Africa/Sao_Tome","Africa/Timbuktu","Africa/Tripoli","Africa/Tunis","Africa/Windhoek","America/Adak","America/Anchorage","America/Anguilla","America/Antigua","America/Araguaina","America/Argentina/Buenos_Aires","America/Argentina/Catamarca","America/Argentina/ComodRivadavia","America/Argentina/Cordoba","America/Argentina/Jujuy","America/Argentina/La_Rioja","America/Argentina/Mendoza","America/Argentina/Rio_Gallegos","America/Argentina/Salta","America/Argentina/San_Juan","America/Argentina/San_Luis","America/Argentina/Tucuman","America/Argentina/Ushuaia","America/Aruba","America/Asuncion","America/Atikokan","America/Atka","America/Bahia","America/Bahia_Banderas","America/Barbados","America/Belem","America/Belize","America/Blanc-Sablon","America/Boa_Vista","America/Bogota","America/Boise","America/Buenos_Aires","America/Cambridge_Bay","America/Campo_Grande","America/Cancun","America/Caracas","America/Catamarca","America/Cayenne","America/Cayman","America/Chicago","America/Chihuahua","America/Ciudad_Juarez","America/Coral_Harbour","America/Cordoba","America/Costa_Rica","America/Coyhaique","America/Creston","America/Cuiaba","America/Curacao","America/Danmarkshavn","America/Dawson","America/Dawson_Creek","America/Denver","America/Detroit","America/Dominica","America/Edmonton","America/Eirunepe","America/El_Salvador","America/Ensenada","America/Fort_Nelson","America/Fort_Wayne","America/Fortaleza","America/Glace_Bay","America/Godthab","America/Goose_Bay","America/Grand_Turk","America/Grenada","America/Guadeloupe","America/Guatemala","America/Guayaquil","America/Guyana","America/Halifax","America/Havana","America/Hermosillo","America/Indiana/Indianapolis","America/Indiana/Knox","America/Indiana/Marengo","America/Indiana/Petersburg","America/Indiana/Tell_City","America/Indiana/Vevay","America/Indiana/Vincennes","America/Indiana/Winamac","America/Indianapolis","America/Inuvik","America/Iqaluit","America/Jamaica","America/Jujuy","America/Juneau","America/Kentucky/Louisville","America/Kentucky/Monticello","America/Knox_IN","America/Kralendijk","America/La_Paz","America/Lima","America/Los_Angeles","America/Louisville","America/Lower_Princes","America/Maceio","America/Managua","America/Manaus","America/Marigot","America/Martinique","America/Matamoros","America/Mazatlan","America/Mendoza","America/Menominee","America/Merida","America/Metlakatla","America/Mexico_City","America/Miquelon","America/Moncton","America/Monterrey","America/Montevideo","America/Montreal","America/Montserrat","America/Nassau","America/New_York","America/Nipigon","America/Nome","America/Noronha","America/North_Dakota/Beulah","America/North_Dakota/Center","America/North_Dakota/New_Salem","America/Nuuk","America/Ojinaga","America/Panama","America/Pangnirtung","America/Paramaribo","America/Phoenix","America/Port-au-Prince","America/Port_of_Spain","America/Porto_Acre","America/Porto_Velho","America/Puerto_Rico","America/Punta_Arenas","America/Rainy_River","America/Rankin_Inlet","America/Recife","America/Regina","America/Resolute","America/Rio_Branco","America/Rosario","America/Santa_Isabel","America/Santarem","America/Santiago","America/Santo_Domingo","America/Sao_Paulo","America/Scoresbysund","America/Shiprock","America/Sitka","America/St_Barthelemy","America/St_Johns","America/St_Kitts","America/St_Lucia","America/St_Thomas","America/St_Vincent","America/Swift_Current","America/Tegucigalpa","America/Thule","America/Thunder_Bay","America/Tijuana","America/Toronto","America/Tortola","America/Vancouver","America/Virgin","America/Whitehorse","America/Winnipeg","America/Yakutat","America/Yellowknife","Antarctica/Casey","Antarctica/Davis","Antarctica/DumontDUrville","Antarctica/Macquarie","Antarctica/Mawson","Antarctica/McMurdo","Antarctica/Palmer","Antarctica/Rothera","Antarctica/South_Pole","Antarctica/Syowa","Antarctica/Troll","Antarctica/Vostok","Arctic/Longyearbyen","Asia/Aden","Asia/Almaty","Asia/Amman","Asia/Anadyr","Asia/Aqtau","Asia/Aqtobe","Asia/Ashgabat","Asia/Ashkhabad","Asia/Atyrau","Asia/Baghdad","Asia/Bahrain","Asia/Baku","Asia/Bangkok","Asia/Barnaul","Asia/Beirut","Asia/Bishkek","Asia/Brunei","Asia/Calcutta","Asia/Chita","Asia/Choibalsan","Asia/Chongqing","Asia/Chungking","Asia/Colombo","Asia/Dacca","Asia/Damascus","Asia/Dhaka","Asia/Dili","Asia/Dubai","Asia/Dushanbe","Asia/Famagusta","Asia/Gaza","Asia/Harbin","Asia/Hebron","Asia/Ho_Chi_Minh","Asia/Hong_Kong","Asia/Hovd","Asia/Irkutsk","Asia/Istanbul","Asia/Jakarta","Asia/Jayapura","Asia/Jerusalem","Asia/Kabul","Asia/Kamchatka","Asia/Karachi","Asia/Kashgar","Asia/Kathmandu","Asia/Katmandu","Asia/Khandyga","Asia/Kolkata","Asia/Krasnoyarsk","Asia/Kuala_Lumpur","Asia/Kuching","Asia/Kuwait","Asia/Macao","Asia/Macau","Asia/Magadan","Asia/Makassar","Asia/Manila","Asia/Muscat","Asia/Nicosia","Asia/Novokuznetsk","Asia/Novosibirsk","Asia/Omsk","Asia/Oral","Asia/Phnom_Penh","Asia/Pontianak","Asia/Pyongyang","Asia/Qatar","Asia/Qostanay","Asia/Qyzylorda","Asia/Rangoon","Asia/Riyadh","Asia/Saigon","Asia/Sakhalin","Asia/Samarkand","Asia/Seoul","Asia/Shanghai","Asia/Singapore","Asia/Srednekolymsk","Asia/Taipei","Asia/Tashkent","Asia/Tbilisi","Asia/Tehran","Asia/Tel_Aviv","Asia/Thimbu","Asia/Thimphu","Asia/Tokyo","Asia/Tomsk","Asia/Ujung_Pandang","Asia/Ulaanbaatar","Asia/Ulan_Bator","Asia/Urumqi","Asia/Ust-Nera","Asia/Vientiane","Asia/Vladivostok","Asia/Yakutsk","Asia/Yangon","Asia/Yekaterinburg","Asia/Yerevan","Atlantic/Azores","Atlantic/Bermuda","Atlantic/Canary","Atlantic/Cape_Verde","Atlantic/Faeroe","Atlantic/Faroe","Atlantic/Jan_Mayen","Atlantic/Madeira","Atlantic/Reykjavik","Atlantic/South_Georgia","Atlantic/St_Helena","Atlantic/Stanley","Australia/ACT","Australia/Adelaide","Australia/Brisbane","Australia/Broken_Hill","Australia/Canberra","Australia/Currie","Australia/Darwin","Australia/Eucla","Australia/Hobart","Australia/LHI","Australia/Lindeman","Australia/Lord_Howe","Australia/Melbourne","Australia/NSW","Australia/North","Australia/Perth","Australia/Queensland","Australia/South","Australia/Sydney","Australia/Tasmania","Australia/Victoria","Australia/West","Australia/Yancowinna","Brazil/Acre","Brazil/DeNoronha","Brazil/East","Brazil/West","Canada/Atlantic","Canada/Central","Canada/Eastern","Canada/Mountain","Canada/Newfoundland","Canada/Pacific","Canada/Saskatchewan","Canada/Yukon","Chile/Continental","Chile/EasterIsland","Europe/Amsterdam","Europe/Andorra","Europe/Astrakhan","Europe/Athens","Europe/Belfast","Europe/Belgrade","Europe/Berlin","Europe/Bratislava","Europe/Brussels","Europe/Bucharest","Europe/Budapest","Europe/Busingen","Europe/Chisinau","Europe/Copenhagen","Europe/Dublin","Europe/Gibraltar","Europe/Guernsey","Europe/Helsinki","Europe/Isle_of_Man","Europe/Istanbul","Europe/Jersey","Europe/Kaliningrad","Europe/Kiev","Europe/Kirov","Europe/Kyiv","Europe/Lisbon","Europe/Ljubljana","Europe/London","Europe/Luxembourg","Europe/Madrid","Europe/Malta","Europe/Mariehamn","Europe/Minsk","Europe/Monaco","Europe/Moscow","Europe/Nicosia","Europe/Oslo","Europe/Paris","Europe/Podgorica","Europe/Prague","Europe/Riga","Europe/Rome","Europe/Samara","Europe/San_Marino","Europe/Sarajevo","Europe/Saratov","Europe/Simferopol","Europe/Skopje","Europe/Sofia","Europe/Stockholm","Europe/Tallinn","Europe/Tirane","Europe/Tiraspol","Europe/Ulyanovsk","Europe/Uzhgorod","Europe/Vaduz","Europe/Vatican","Europe/Vienna","Europe/Vilnius","Europe/Volgograd","Europe/Warsaw","Europe/Zagreb","Europe/Zaporozhye","Europe/Zurich","Indian/Antananarivo","Indian/Chagos","Indian/Christmas","Indian/Cocos","Indian/Comoro","Indian/Kerguelen","Indian/Mahe","Indian/Maldives","Indian/Mauritius","Indian/Mayotte","Indian/Reunion","Mexico/BajaNorte","Mexico/BajaSur","Mexico/General","Pacific/Apia","Pacific/Auckland","Pacific/Bougainville","Pacific/Chatham","Pacific/Chuuk","Pacific/Easter","Pacific/Efate","Pacific/Enderbury","Pacific/Fakaofo","Pacific/Fiji","Pacific/Funafuti","Pacific/Galapagos","Pacific/Gambier","Pacific/Guadalcanal","Pacific/Guam","Pacific/Honolulu","Pacific/Johnston","Pacific/Kanton","Pacific/Kiritimati","Pacific/Kosrae","Pacific/Kwajalein","Pacific/Majuro","Pacific/Marquesas","Pacific/Midway","Pacific/Nauru","Pacific/Niue","Pacific/Norfolk","Pacific/Noumea","Pacific/Pago_Pago","Pacific/Palau","Pacific/Pitcairn","Pacific/Pohnpei","Pacific/Ponape","Pacific/Port_Moresby","Pacific/Rarotonga","Pacific/Saipan","Pacific/Samoa","Pacific/Tahiti","Pacific/Tarawa","Pacific/Tongatapu","Pacific/Truk","Pacific/Wake","Pacific/Wallis","Pacific/Yap","US/Alaska","US/Aleutian","US/Arizona","US/Central","US/East-Indiana","US/Eastern","US/Hawaii","US/Indiana-Starke","US/Michigan","US/Mountain","US/Pacific","US/Samoa"];
@@ -779,7 +916,7 @@
           user-select:none;-webkit-user-select:none;white-space:nowrap;}
         .fab:active {cursor:grabbing;}
         .fab.leak {background:#af1e29;border-color:#ee8790;animation:warn-pulse 1.8s ease-in-out infinite;}
-        .fab.unknown {background:#98610f;border-color:#e8b45b;}
+        .fab.unknown,.fab.consistency {background:#98610f;border-color:#e8b45b;}
         .fab.off {background:#515861;border-color:#767e87;}
         @keyframes warn-pulse {50% {box-shadow:0 0 0 5px #d32f2f50;}}
         .panel {pointer-events:auto;position:fixed;width:min(390px,calc(100vw - 24px));
@@ -855,6 +992,18 @@
           <button id="tzSystem" class="tiny" type="button">Use system timezone</button>
         </div>
         <div class="section">
+          <div class="setting"><span class="label">Region (JavaScript)</span><input id="regionOn" type="checkbox" aria-label="Enable region override"></div>
+          <div class="sub">Changes the region of default Intl formatting, not the device region or your IP address. Explicit site-supplied locales are not modified.</div>
+          <div class="inputrow"><input id="regionInput" type="search" autocomplete="off" spellcheck="false" placeholder="Search a country or enter ISO code, e.g. JP"><button id="regionSave" class="primary" type="button">Save</button></div>
+          <div id="regionOptions" class="list"></div><div id="regionCount" class="count"></div>
+          <div class="sub" id="regionEffective"></div>
+        </div>
+        <div class="section">
+          <div class="setting"><span class="label">Match Language Regions</span><input id="matchOn" type="checkbox" aria-label="Automatically match browser languages to their usual regions"></div>
+          <div class="sub">Automatically converts region-tagged browser languages (such as en-CN → en-US, it-CN → it-IT). Language priority stays unchanged. A saved custom language list takes precedence.</div>
+          <div class="sub" id="matchedLanguages"></div>
+        </div>
+        <div class="section">
           <div class="setting"><span class="label">Browser Languages</span><input id="languageOn" type="checkbox" aria-label="Enable browser language override"></div>
           <div class="sub">Currently reported by the browser: <span id="originalLanguages"></span>. Customize the order; the first is navigator.language.</div>
           <div id="languageEditor">
@@ -867,8 +1016,9 @@
         </div>
         <div class="section">
           <div class="setting"><span class="label">Intl Locale</span><input id="localeOn" type="checkbox" aria-label="Enable Intl locale override"></div>
-          <div class="sub">Browser default: <span id="nativeLocale"></span>. Use any valid BCP-47 locale.</div>
-          <div class="inputrow"><input id="localeInput" type="text" spellcheck="false" placeholder="e.g. en-US"><button id="localeSave" class="primary" type="button">Save</button></div>
+          <div class="sub">Browser default: <span id="nativeLocale"></span>. Choose any BCP-47 locale; if Region is enabled, its region takes precedence for default formatting.</div>
+          <div class="inputrow"><input id="localeInput" type="search" autocomplete="off" spellcheck="false" placeholder="Search or enter a BCP-47 locale"><button id="localeSave" class="primary" type="button">Save</button></div>
+          <div id="localeOptions" class="list"></div><div id="localeCount" class="count"></div>
         </div>
         <div class="section">
           <div class="setting"><span class="label">Chinese Font Protection</span><input id="fontOn" type="checkbox" aria-label="Enable Chinese font masking"></div>
@@ -879,6 +1029,12 @@
           <div class="sub">Checks on every visit using external STUN servers and api.ipify.org. The button turns red on an observed leak. Checks do not block WebRTC traffic.</div>
           <div class="status" id="rtcStatus"></div>
           <button id="rtcRetry" class="tiny" type="button">Check again</button>
+        </div>
+        <div class="section">
+          <div class="setting"><span class="label">IP / Region / Timezone Consistency</span><input id="ipConsistencyOn" type="checkbox" aria-label="Enable IP country consistency checks"></div>
+          <div class="sub">Uses ipapi.co to check approximate HTTP exit-IP location on each visit. A mismatch is a warning, not proof of a leak. IP lookup sends your public IP to that service.</div>
+          <div class="status" id="consistencyStatus"></div>
+          <button id="consistencyRetry" class="tiny" type="button">Check again</button>
         </div>
         <div class="actionrow" style="margin-top:12px;justify-content:flex-end"><button id="reset" type="button">Reset to defaults</button></div>
       </section>
@@ -1001,6 +1157,7 @@
     }
     function renderRtc() {
       let label = '';
+      const regionWarning = prefs.ipConsistency && consistencyState.state === 'warning';
       switch (rtcState.state) {
         case 'leak': label = '⚠ TZ !'; break;
         case 'unknown': label = 'TZ ?'; break;
@@ -1008,20 +1165,33 @@
         case 'off': label = 'TZ ⚙'; break;
         default: label = 'TZ ✓';
       }
+      if (regionWarning && rtcState.state !== 'leak') label = '⚠ TZ !';
       fab.textContent = label;
-      fab.className = `fab ${rtcState.state === 'leak' ? 'leak' : rtcState.state === 'unknown' ? 'unknown' : rtcState.state === 'off' ? 'off' : ''}`;
+      fab.className = `fab ${rtcState.state === 'leak' ? 'leak' : regionWarning ? 'consistency' : rtcState.state === 'unknown' ? 'unknown' : rtcState.state === 'off' ? 'off' : ''}`;
       $('rtcStatus').className = `status ${rtcState.state === 'leak' ? 'leak' : rtcState.state === 'safe' ? 'ok' : rtcState.state === 'off' ? '' : 'warning'}`;
       $('rtcStatus').textContent = `${rtcState.state.toUpperCase()}: ${rtcState.details}`;
     }
     subscribers.add(renderRtc);
+    function renderConsistency() {
+      $('consistencyStatus').className = `status ${consistencyState.state === 'warning' ? 'warning' : consistencyState.state === 'ok' ? 'ok' : ''}`;
+      $('consistencyStatus').textContent = `${consistencyState.state.toUpperCase()}: ${consistencyState.details}`;
+      renderRtc();
+    }
+    consistencyListeners.add(renderConsistency);
     function syncControls() {
       $('tzNow').textContent = `Saved: ${prefs.timezone === SYSTEM ? `System (${systemZone})` : prefs.timezone}`;
       $('languageOn').checked = prefs.languageEnabled;
+      $('matchOn').checked = prefs.matchLanguageRegions;
+      $('regionOn').checked = prefs.regionEnabled;
+      $('ipConsistencyOn').checked = prefs.ipConsistency;
+      $('regionEffective').textContent = `Default Intl locale after overrides: ${effectiveLocale(prefs)}`;
+      $('matchedLanguages').textContent = `Effective languages: ${effectiveLanguages(prefs).join(', ')}`;
       $('localeOn').checked = prefs.localeEnabled;
       $('fontOn').checked = prefs.fonts;
       $('rtcOn').checked = prefs.rtc;
       $('languageEditor').hidden = !prefs.languageEnabled;
       renderRtc();
+      renderConsistency();
     }
     $('originalLanguages').textContent = originalLanguages.join(', ');
     $('nativeLocale').textContent = originalLocale;
@@ -1061,6 +1231,31 @@
       setting('timezone',SYSTEM,true);
     });
 
+    $('regionInput').value = prefs.region;
+    function regionResults() {
+      const q=$('regionInput').value.trim().toLowerCase();
+      showOptions('regionOptions', countries.filter(x => x.code.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)),
+        'regionInput','regionCount',90);
+    }
+    $('regionInput').addEventListener('input',regionResults);
+    $('regionOn').addEventListener('change',e=>{
+      setting('regionEnabled',e.target.checked,true);
+      runConsistencyCheck();
+    });
+    $('regionSave').addEventListener('click',()=>{
+      const value = validRegion($('regionInput').value);
+      if (!value) return message('Unknown country or region. Enter a 2-letter ISO 3166-1 code.',true);
+      $('regionInput').value = value;
+      setting('region',value,true);
+      runConsistencyCheck();
+    });
+    $('matchOn').addEventListener('change',e=>setting('matchLanguageRegions',e.target.checked,true));
+    function localeResults() {
+      const q=$('localeInput').value.trim().toLowerCase();
+      showOptions('localeOptions',languageLabels.filter(x=>x.code.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)),
+        'localeInput','localeCount',90);
+    }
+    $('localeInput').addEventListener('input',localeResults);
     let languageDraft = [...prefs.languages];
     function renderChips() {
       const fragment = document.createDocumentFragment();
@@ -1125,10 +1320,14 @@
       if (!v) return message('Invalid BCP-47 locale.',true);
       setting('locale',v,true);
     });
-    $('fontOn').addEventListener('change',e => setting('fonts',e.target.checked,false));
+    $('fontOn').addEventListener('change',e => setting('fonts',e.target.checked,true));
     $('rtcOn').addEventListener('change',e => {
       if (setting('rtc',e.target.checked,false)) runRtcCheck();
     });
+    $('ipConsistencyOn').addEventListener('change',e=>{
+      if (setting('ipConsistency',e.target.checked,false)) runConsistencyCheck();
+    });
+    $('consistencyRetry').addEventListener('click',()=>runConsistencyCheck(true));
     $('rtcRetry').addEventListener('click', () => {
       if (!prefs.rtc) return message('Enable automatic WebRTC checks first.',true);
       runRtcCheck();
@@ -1136,7 +1335,7 @@
     $('reset').addEventListener('click', () => {
       if (!page.confirm('Restore default settings? Your floating button position will be kept.')) return;
       const next = {...defaultConfig, languages:[...originalLanguages], locale:originalLocale};
-      const reloadKeys = ['timezone','languageEnabled','languages','localeEnabled','locale'];
+      const reloadKeys = ['timezone','languageEnabled','matchLanguageRegions','languages','regionEnabled','region','localeEnabled','locale','fonts'];
       const queued = { before:{}, keys:[] };
       for (const key of reloadKeys) {
         if (JSON.stringify(prefs[key]) !== JSON.stringify(next[key])) {
@@ -1144,9 +1343,10 @@
         }
       }
       prefs = structuredCloneSafe(next);
-      applied.fonts = prefs.fonts;
+      // Font hooks cannot be cleanly removed or added within the current page.
+      // Keep the old runtime until a user-approved reload verifies the reset.
       applied.rtc = prefs.rtc;
-      if (!verifySync('fonts')) { prefs.fonts = false; applied.fonts = false; }
+      applied.ipConsistency = prefs.ipConsistency;
       if (!verifySync('rtc')) { prefs.rtc = false; applied.rtc = false; }
       persist();
       GM_setValue(PENDING_KEY, queued.keys.length ? queued : null);
@@ -1154,8 +1354,9 @@
       $('localeInput').value = prefs.locale;
       $('tzInput').value = '';
       renderChips();
+      $('regionInput').value=prefs.region;
       syncControls();
-      runRtcCheck();
+      runRtcCheck(); runConsistencyCheck(true);
       if (queued.keys.length && page.confirm('Defaults saved. Reload now to apply and verify them?')) {
         page.location.reload();
       } else {
@@ -1167,7 +1368,7 @@
       languageDraft = [...prefs.languages];
       renderChips();
       panel.hidden = false;
-      syncControls(); tzResults(); langResults(); layout();
+      syncControls(); tzResults(); langResults(); regionResults(); localeResults(); layout();
     };
     function closePanel() { clearMessage(); panel.hidden = true; }
     fab.addEventListener('click', () => {
@@ -1194,6 +1395,10 @@
     if (document.body) createWidget();
     else document.addEventListener('DOMContentLoaded',createWidget,{once:true});
   }
-  if (applied.rtc) runRtcCheck();
-  else updateRtc('off','Automatic checking is disabled.');
+  if (page.top === page) {
+    if (applied.ipConsistency) runConsistencyCheck(true);
+    else updateConsistency('off','Automatic checks are disabled.');
+    if (applied.rtc) runRtcCheck();
+    else updateRtc('off','Automatic checking is disabled.');
+  }
 })();
