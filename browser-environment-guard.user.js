@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude / Anthropic - Environment Manager
 // @namespace    https://userscripts.local/claude-anthropic-timezone
-// @description  Compact environment controls, font privacy, WebRTC checks, and concise consistency alerts. Draggable; settings persist.
+// @description  Environment controls with offset/alias timezone search, regional language matching, privacy checks, and persistent settings.
 // @match        https://claude.ai/*
 // @match        https://*.claude.ai/*
 // @match        https://claude.com/*
@@ -55,11 +55,63 @@
     rtc: true,
   });
 
+  // Common shorthand is only a search aid; not all abbreviations are unique.
+  const zoneAliases = {
+    utc:'UTC', gmt:'UTC', z:'UTC', ut:'UTC',
+    pt:'America/Los_Angeles', pst:'America/Los_Angeles', pdt:'America/Los_Angeles',
+    et:'America/New_York', est:'America/New_York', edt:'America/New_York',
+    ct:'America/Chicago', cdt:'America/Chicago',
+    mt:'America/Denver', mdt:'America/Denver',
+    jst:'Asia/Tokyo', kst:'Asia/Seoul',
+    cet:'Europe/Paris', cest:'Europe/Paris',
+    bst:'Europe/London',
+    aest:'Australia/Brisbane', aedt:'Australia/Sydney',
+    acst:'Australia/Darwin', acdt:'Australia/Adelaide',
+    nzst:'Pacific/Auckland', nzdt:'Pacific/Auckland',
+    kolkata:'Asia/Kolkata', calcutta:'Asia/Calcutta',
+    beijing:'Asia/Shanghai', peking:'Asia/Shanghai',
+    kyiv:'Europe/Kyiv', kiev:'Europe/Kiev',
+  };
+  // Interpret +09, GMT+9, UTC-05:30, +0530 and +5.5 as offsets east of UTC.
+  // Etc/GMT signs are reversed; use native offset IDs when supported.
+  function parseOffset(input) {
+    if (typeof input !== 'string') return null;
+    let q = input.trim().toUpperCase().replace(/\s+/g,'');
+    if (/^(UTC|GMT|UT|Z)$/.test(q)) return 0;
+    q = q.replace(/^(UTC|GMT)/,'');
+    const m = /^([+-])(\d{1,2})(?:(?::(\d{1,2}))|(?:(\d{2})))?(?:\.(\d+))?$/.exec(q);
+    if (!m) return null;
+    const hours = Number(m[2]);
+    const minutes = m[3] != null ? Number(m[3]) : m[4] != null ? Number(m[4])
+      : m[5] != null ? Math.round(Number('0.'+m[5])*60) : 0;
+    if (hours > 23 || minutes > 59 || (hours===23 && minutes>59)) return null;
+    return (m[1] === '-' ? -1 : 1)*(hours*60+minutes);
+  }
+  function offsetText(minutes) {
+    const m = Math.abs(minutes);
+    return `${minutes < 0 ? '-' : '+'}${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
+  }
+  function nativeZone(input) {
+    try { return new NativeDTF('en-US', {timeZone:input}).resolvedOptions().timeZone; }
+    catch { return null; }
+  }
+  function offsetZone(minutes) {
+    if (minutes === 0) return 'UTC';
+    const direct = nativeZone(offsetText(minutes));
+    if (direct) return direct;
+    if (minutes % 60 === 0 && Math.abs(minutes) <= 14 * 60)
+      return nativeZone(`Etc/GMT${minutes > 0 ? '-' : '+'}${Math.abs(minutes)/60}`);
+    return null;
+  }
   function validZone(input) {
     if (typeof input !== 'string') return null;
-    if (input.toLowerCase().trim() === SYSTEM) return SYSTEM;
-    try { return new NativeDTF('en-US', { timeZone: input.trim() }).resolvedOptions().timeZone; }
-    catch { return null; }
+    const q = input.trim();
+    if (q.toLowerCase() === SYSTEM) return SYSTEM;
+    const shorthand = zoneAliases[q.toLowerCase()];
+    if (shorthand) return nativeZone(shorthand);
+    const offset = parseOffset(q);
+    if (offset !== null) return offsetZone(offset);
+    return nativeZone(q);
   }
   function validLanguage(input) {
     if (typeof input !== 'string') return null;
@@ -1082,6 +1134,87 @@
     if (!list.length) list = fallbackZones;
     return [...new Set(['UTC', ...list, ...(zone !== SYSTEM ? [zone] : [])])].sort();
   })();
+  // Format the current offset and abbreviation for each supported IANA zone.
+  // Use country names and common aliases as search terms; never assign ambiguous
+  // abbreviations like CST or IST a single timezone without user selection.
+  let zoneIndex = null;
+  function timezoneIndex() {
+    if (zoneIndex) return zoneIndex;
+    const now = new NativeDate();
+    const displayRegion = typeof page.Intl.DisplayNames === 'function'
+      ? new page.Intl.DisplayNames(['en'],{type:'region'}) : null;
+    const entries = zones.map(code => {
+      const signed = -currentOffsetForZone(code,now);
+      let abbr = '', generic = '';
+      try {
+        const extract = (type) => new NativeDTF('en-US',{timeZone:code,timeZoneName:type})
+          .formatToParts(now).find(p => p.type === 'timeZoneName')?.value || '';
+        abbr = extract('short');
+        generic = extract('longGeneric');
+      } catch {}
+      const regions = countriesForZone(code);
+      const names = regions.map(c => displayRegion?.of(c) || c);
+      const special = Object.keys(zoneAliases).filter(k => nativeZone(zoneAliases[k]) === code).join(' ');
+      const offset = Number.isFinite(signed) ? `UTC${offsetText(signed)}` : '';
+      const label = [code,offset,abbr].filter(Boolean).join('  ·  ');
+      const city = code.split('/').pop().replaceAll('_',' ');
+      return {code,label,offset:signed,city:city.toLowerCase(),
+        terms:`${code} ${code.replaceAll('_',' ')} ${names.join(' ')} ${regions.join(' ')} ${abbr} ${generic} ${special}`.toLowerCase()};
+    });
+    zoneIndex = entries;
+    return entries;
+  }
+  function timezoneMatches(query) {
+    const raw = query.trim();
+    if (!raw) return {items:timezoneIndex().slice(0,45), hint:'Search city, country, offset, or abbreviation.'};
+    const q=raw.toLowerCase();
+    const offset = parseOffset(raw);
+    // Show helpful suggestions even before an offset number has been typed.
+    if (/^(?:(?:utc|gmt)\s*)?[+-]$/.test(q)) {
+      const sign=q.includes('+') ? 1 : -1;
+      const values=[1,2,3,4,5,5.5,6,7,8,9,9.5,10,11,12,13,14];
+      const items=values.map(h=>Math.round(h*60)*sign).map(minutes=>({
+        code:offsetZone(minutes),label:`UTC${offsetText(minutes)}  ·  Fixed offset (no DST)`
+      })).filter(x=>x.code);
+      return {items,hint:'Enter a number, or select a fixed offset.'};
+    }
+    const alias = zoneAliases[q] || ({'pacific time':'America/Los_Angeles','eastern time':'America/New_York','central time':'America/Chicago','mountain time':'America/Denver'})[q];
+    const results = [];
+    const candidates=timezoneIndex();
+    const tokens=q.replace(/[_/]/g,' ').split(/\s+/).filter(Boolean);
+    for (const item of candidates) {
+      let score = Infinity;
+      const city=item.city, code=item.code.toLowerCase();
+      if (alias && code === (nativeZone(alias) || alias).toLowerCase()) score = 0;
+      if (code === q || city === q) score = Math.min(score,0);
+      if (offset !== null && item.offset === offset) score = Math.min(score, 4);
+      if (code.startsWith(q) || city.startsWith(q)) score = Math.min(score,10);
+      if (item.terms.split(/[^a-z0-9+-]+/).includes(q)) score = Math.min(score,15);
+      if (code.includes(q) || city.includes(q)) score = Math.min(score,20);
+      if (tokens.every(token => item.terms.includes(token))) score = Math.min(score,30);
+      if (score < Infinity) results.push({ ...item, score });
+    }
+    // UTC± offsets are fixed and do not observe DST. Show separately from cities.
+    if (offset !== null) {
+      const fixed=offsetZone(offset);
+      if (fixed) results.unshift({code:fixed, label:`UTC${offsetText(offset)}  ·  Fixed offset (no DST)`,score:-2,city:''});
+    }
+    if (['utc','gmt','ut','z'].includes(q))
+      results.unshift({code:'UTC',label:'UTC / GMT  ·  UTC+00:00',score:-3,city:''});
+    let hint='';
+    if (!results.length || q === 'ptc') {
+      // PTC is not an unambiguous timezone abbreviation. Offer PT without guessing.
+      if (q === 'ptc' || q === 'pacific time canada') {
+        hint='PTC is not a recognized timezone ID. Did you mean PT (Pacific Time)?';
+        return {items:candidates.filter(x=>x.code==='America/Los_Angeles' || x.code==='America/Vancouver'),hint};
+      }
+      hint='No exact match. Try UTC+9, GMT-5, +05:30, PT, PST, or a city name.';
+    }
+    const unique = new Set();
+    const items=results.sort((a,b)=>a.score-b.score || a.code.localeCompare(b.code))
+      .filter(x=>!unique.has(x.code) && unique.add(x.code));
+    return {items,hint};
+  }
 
   let showPanel = null;
   if (typeof GM_registerMenuCommand === 'function') {
@@ -1187,25 +1320,26 @@
         <div class="section">
           <div class="label">Timezone</div>
           <div class="sub" id="tzNow"></div>
-          <div class="inputrow"><input id="tzInput" type="search" autocomplete="off" spellcheck="false" placeholder="Search or enter an IANA timezone"><button class="primary" id="tzSave" type="button">Save</button></div>
+          <div class="inputrow"><input id="tzInput" type="search" autocomplete="off" spellcheck="false" placeholder="City, country, +9, UTC-5, GMT, PST, PT..."><button class="primary" id="tzSave" type="button">Save</button></div>
           <div class="list" id="tzOptions"></div><div class="count" id="tzCount"></div>
           <button id="tzSystem" class="tiny" type="button">Use system timezone</button>
         </div>
         <div class="section">
           <div class="setting"><span class="label">Region (JavaScript)</span><input id="regionOn" type="checkbox" aria-label="Enable region override"></div>
-          <div class="sub">Sets the default Intl region only; not the device or IP.</div>
+          <div class="sub">Changes default Intl region, not navigator.languages, the OS, or your IP. Use Match Language Regions for language tags.</div>
           <div class="inputrow"><input id="regionInput" type="search" autocomplete="off" spellcheck="false" placeholder="Search a country or enter ISO code, e.g. JP"><button id="regionSave" class="primary" type="button">Save</button></div>
           <div id="regionOptions" class="list"></div><div id="regionCount" class="count"></div>
           <div class="sub" id="regionEffective"></div>
         </div>
         <div class="section">
           <div class="setting"><span class="label">Match Language Regions</span><input id="matchOn" type="checkbox" aria-label="Automatically match browser languages to their usual regions"></div>
-          <div class="sub">Matches language tags to their usual regions. Custom lists take priority.</div>
+          <div class="sub">Replaces region tags in browser languages with each language’s typical region. Custom language lists take priority.</div>
           <div class="sub" id="matchedLanguages"></div>
         </div>
         <div class="section">
           <div class="setting"><span class="label">Browser Languages</span><input id="languageOn" type="checkbox" aria-label="Enable browser language override"></div>
-          <div class="sub">Detected: <span id="originalLanguages"></span>. First entry is the primary language.</div>
+          <div class="sub">Exposed now: <span id="exposedLanguages"></span></div>
+          <div class="sub">Original browser tags: <span id="originalLanguages"></span></div>
           <div id="languageEditor">
             <div class="chips" id="chips"></div>
             <div class="inputrow"><input id="languageInput" type="search" autocomplete="off" spellcheck="false" placeholder="Find or enter any BCP-47 language"><button id="languageAdd" type="button">Add</button></div>
@@ -1385,7 +1519,8 @@
       $('regionOn').checked = prefs.regionEnabled;
       $('ipConsistencyOn').checked = prefs.ipConsistency;
       $('regionEffective').textContent = `Default Intl locale after overrides: ${effectiveLocale(prefs)}`;
-      $('matchedLanguages').textContent = `Effective languages: ${effectiveLanguages(prefs).join(', ')}`;
+      $('matchedLanguages').textContent = `Expected after reload: ${effectiveLanguages(prefs).join(', ')}`;
+      $('exposedLanguages').textContent = Array.from(page.navigator.languages || []).join(', ');
       $('localeOn').checked = prefs.localeEnabled;
       $('fontOn').checked = prefs.fonts;
       $('rtcOn').checked = prefs.rtc;
@@ -1416,14 +1551,16 @@
     }
     $('tzInput').value = prefs.timezone === SYSTEM ? '' : prefs.timezone;
     function tzResults() {
-      const q = $('tzInput').value.toLowerCase().trim().replaceAll(' ', '_');
-      const found = zones.filter(z => z.toLowerCase().includes(q)).map(z => ({ code:z, label:z }));
-      showOptions('tzOptions',found,'tzInput','tzCount');
+      const q = $('tzInput').value;
+      const {items,hint} = timezoneMatches(q);
+      showOptions('tzOptions',items,'tzInput','tzCount',75);
+      $('tzCount').textContent = `${items.length} results${hint ? ' · '+hint : ''}`;
     }
     $('tzInput').addEventListener('input', tzResults);
     $('tzSave').addEventListener('click', () => {
-      const valid = validZone($('tzInput').value);
-      if (!valid) return message('Invalid IANA timezone. Example: America/New_York.',true);
+      const raw = $('tzInput').value.trim();
+      const valid = validZone(raw);
+      if (!valid) return message('Choose a suggestion or enter a valid timezone, GMT offset, or recognized abbreviation.',true);
       setting('timezone',valid,true);
     });
     $('tzSystem').addEventListener('click', () => {
@@ -1432,9 +1569,30 @@
     });
 
     $('regionInput').value = prefs.region;
+    function rankedOptions(items, query) {
+      const q=query.trim().toLowerCase().replace(/[_-]/g,' ');
+      if (!q) return items.slice(0,90);
+      return items.map(item => {
+        const code=item.code.toLowerCase().replace(/[_-]/g,' ');
+        const label=item.label.toLowerCase().replace(/[_-]/g,' ');
+        const words=q.split(/\s+/);
+        const score=code===q ? 0 : label===q ? 1 : code.startsWith(q) ? 2
+          : label.startsWith(q) ? 3 : label.split(/[^a-z0-9]+/).some(w=>w.startsWith(q)) ? 5
+          : words.every(w=>label.includes(w)||code.includes(w)) ? 10 : 100;
+        return {item,score};
+      }).filter(x=>x.score<100).sort((a,b)=>a.score-b.score || a.item.label.localeCompare(b.item.label))
+        .map(x=>x.item);
+    }
     function regionResults() {
-      const q=$('regionInput').value.trim().toLowerCase();
-      showOptions('regionOptions', countries.filter(x => x.code.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)),
+      const q=$('regionInput').value.trim();
+      const aliases={usa:'US',america:'US',uk:'GB',britain:'GB',england:'GB',uae:'AE',korea:'KR'};
+      const match=aliases[q.toLowerCase()];
+      const options=rankedOptions(countries,q);
+      if (match) {
+        const first=countries.find(x=>x.code===match);
+        if (first) options.unshift(first);
+      }
+      showOptions('regionOptions', [...new Map(options.map(x=>[x.code,x])).values()],
         'regionInput','regionCount',90);
     }
     $('regionInput').addEventListener('input',regionResults);
@@ -1452,7 +1610,7 @@
     $('matchOn').addEventListener('change',e=>setting('matchLanguageRegions',e.target.checked,true));
     function localeResults() {
       const q=$('localeInput').value.trim().toLowerCase();
-      showOptions('localeOptions',languageLabels.filter(x=>x.code.toLowerCase().includes(q) || x.label.toLowerCase().includes(q)),
+      showOptions('localeOptions',rankedOptions(languageLabels,q),
         'localeInput','localeCount',90);
     }
     $('localeInput').addEventListener('input',localeResults);
@@ -1491,7 +1649,7 @@
     }
     function langResults() {
       const q = $('languageInput').value.toLowerCase().trim();
-      const found = languageLabels.filter(x => x.label.toLowerCase().includes(q) || x.code.toLowerCase().includes(q));
+      const found = rankedOptions(languageLabels,q);
       showOptions('languageOptions',found,'languageInput','languageCount');
     }
     $('languageInput').addEventListener('input', langResults);
