@@ -117,4 +117,4 @@ return metrics ? Math.round(metrics[key === 'offsetWidth' ? 'width' : 'height'])
 }
 }
 }
-installFontMask();
+if (applied.fonts) installFontMask();
