@@ -42,10 +42,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
 // @grant        GM_addValueChangeListener
-// @connect      api.ipify.org
 // @connect      ipapi.co
-// @connect      ipv4.icanhazip.com
-// @connect      checkip.amazonaws.com
 // @connect      ipwho.is
 // @connect      ipinfo.io
 // @connect      raw.githubusercontent.com
@@ -783,13 +780,39 @@ return { ok: false, info: 'Verification failed. The switch has returned to its p
 persist();
 return { ok: true, info: 'Setting passed its JavaScript check.' };
 }
-const rtcState = { state: 'checking', details: 'Starting WebRTC check...', httpIPv4: null, httpIPs:[],ipDisagreement:false };
+const sensitiveWebRtcCountries = new Set(['CN','HK']);
+function classifyWebRtcCountries(countries) {
+  const known = countries.filter(v => typeof v === 'string' && /^[A-Z]{2}$/.test(v));
+  const risky = known.filter(v => sensitiveWebRtcCountries.has(v));
+  if (risky.length >= 2) return 'risk';
+  if (risky.length > 0) return 'unknown';
+  return known.length >= 2 ? 'other' : 'unknown';
+}
+function publicIPv6(ip) {
+  const value = String(ip).toLowerCase().replace(/^\[|\]$/g, '').split('%')[0];
+  if (!value.includes(':') || !/^[0-9a-f:]+$/.test(value)) return false;
+  if (/^::(?:0|1)?$/.test(value)) return false;
+  const groups = value.split(':');
+  const first = parseInt(groups[0] || '0',16);
+  const second = parseInt(groups[1] || '0',16);
+  if (!Number.isFinite(first) || first === 0) return false;
+  if (first >= 0xfc00 || (first >= 0xfe80 && first <= 0xfebf)) return false;
+  if (first === 0x2001 && second === 0x0db8) return false;
+  return true;
+}
+function publicCandidateAddress(ip) {
+  const value = String(ip).replace(/^\[|\]$/g,'').split('%')[0];
+  const normalized = value.replace(/^::ffff:/i,'');
+  if (normalized.includes('.') && normalized.includes(':')) return false;
+  return publicIPv4(normalized) || publicIPv6(normalized) ? normalized : null;
+}
+const rtcState = { state: 'checking', details: 'Starting WebRTC check...' };
 const subscribers = new Set();
 function updateRtc(state, details) {
 rtcState.state = state;
 rtcState.details = details;
 for (const callback of subscribers) { try { callback(); } catch {} }
-if (prefs.ipConsistency && state !== 'checking') runConsistencyCheck();
+if (applied.ipConsistency && state !== 'checking') runConsistencyCheck();
 }
 function ipv4(ip) {
 const values = String(ip).split('.');
@@ -828,24 +851,6 @@ onerror:()=>finish(null),ontimeout:()=>finish(null),onabort:()=>finish(null)});
 });
 }
 const readJSON = async url => { try { return JSON.parse(await gmRead(url)); } catch { return null; } };
-const ipSources = [
-async () => (await readJSON('https://api.ipify.org?format=json'))?.ip,
-async () => (await gmRead('https://ipv4.icanhazip.com/'))?.trim(),
-async () => (await gmRead('https://checkip.amazonaws.com/'))?.trim(),
-];
-async function externalIPv4() {
-const first = await Promise.all(ipSources.slice(0,2).map(fn => fn().catch(()=>null)));
-let values = first.filter(publicIPv4);
-if (values.length < 2 || (values.length === 2 && values[0] !== values[1])) {
-const last = await ipSources[2]().catch(()=>null);
-if (publicIPv4(last)) values.push(last);
-}
-const ips = [...new Set(values)];
-const counts = ips.map(ip => values.filter(x => x === ip).length);
-const best = counts.length ? Math.max(...counts) : 0;
-return {ip: ips.length === 1 || best >= 2 ? ips[counts.indexOf(best)] : null,
-ips, disagreement:ips.length > 1};
-}
 const iceServers = [
 {name:'Google', urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']},
 {name:'Cloudflare', urls:['stun:stun.cloudflare.com:3478']},
@@ -888,36 +893,65 @@ return {candidates:results.flatMap(x=>x.candidates),
 completed:results.filter(x=>!x.error).length, attempts:results.length,
 errors:results.filter(x=>x.error).map(x=>x.error)};
 }
+// Geolocate public ICE candidates only, never private/mDNS candidates.
+const candidateGeographyProviders = [
+  async ip => { const d=await readJSON('https://ipwho.is/' + encodeURIComponent(ip));
+    return d && d.success !== false ? d : null; },
+  async ip => { const d=await readJSON('https://ipapi.co/' + encodeURIComponent(ip) + '/json/');
+    return d && !d.error ? d : null; },
+  async ip => { const d=await readJSON('https://ipinfo.io/' + encodeURIComponent(ip) + '/json');
+    return d && !d.error ? d : null; },
+];
+const candidateGeoCache = new Map();
+async function locateCandidateCountry(ip) {
+  const cached=candidateGeoCache.get(ip);
+  if (cached && Date.now()-cached.time < 900000) return cached.result;
+  const lookup=async fn=>{
+    try {
+      const d=await fn(ip);
+      if (!d || (d.ip && d.ip.toLowerCase() !== ip.toLowerCase())) return null;
+      const country=String(d.country_code || d.country || '').toUpperCase();
+      return /^[A-Z]{2}$/.test(country) ? country : null;
+    } catch { return null; }
+  };
+  const results=await Promise.all(candidateGeographyProviders.slice(0,2).map(lookup));
+  let classification=classifyWebRtcCountries(results);
+  if (classification==='unknown') {
+    results.push(await lookup(candidateGeographyProviders[2]));
+    classification=classifyWebRtcCountries(results);
+  }
+  const result={classification,countries:results.filter(Boolean)};
+  candidateGeoCache.set(ip,{time:Date.now(),result});
+  return result;
+}
 let rtcRunning = null;
 async function runRtcCheck() {
-if (!applied.rtc) { updateRtc('off', 'Automatic checking is disabled.'); return; }
-if (rtcRunning) return rtcRunning;
-updateRtc('checking', 'Checking independent HTTP/IP and STUN routes…');
-rtcRunning = (async () => {
-const [http, ice] = await Promise.all([externalIPv4(), iceCandidates()]);
-if (!applied.rtc) { updateRtc('off', 'Automatic checking is disabled.'); return; }
-rtcState.httpIPv4 = http.ip;
-rtcState.httpIPs = http.ips;
-rtcState.ipDisagreement = http.disagreement;
-const peerV4 = [...new Set(ice.candidates.filter(c =>
-['srflx','prflx','host'].includes(c.type) && publicIPv4(c.ip)).map(c=>c.ip))];
-const mismatch = http.ip && !http.disagreement && peerV4.filter(ip => ip !== http.ip);
-if (mismatch?.length) {
-updateRtc('leak', `Possible public-IP leak: WebRTC ${mismatch.join(', ')} vs HTTP ${http.ip}. Check browser or VPN routing.`);
-} else if (http.disagreement) {
-updateRtc('limited', `HTTP IP providers disagree (${http.ips.join(', ')}); WebRTC result inconclusive.`);
-} else if (!http.ip) {
-updateRtc('limited', 'HTTP IP unavailable across backup providers; comparison incomplete.');
-} else if (!peerV4.length) {
-updateRtc('limited', `No public IPv4 ICE candidate found via ${ice.attempts} STUN routes. Local/private addresses ignored.`);
-} else if (ice.completed < ice.attempts) {
-updateRtc('limited', `Observed WebRTC IPv4 matches HTTP ${http.ip}, but ${ice.attempts-ice.completed} STUN route(s) incomplete.`);
-} else {
-updateRtc('safe', `No observed public IPv4 mismatch across ${ice.attempts} STUN routes. IPv6 and blocked paths remain unverified.`);
-}
-})().catch(err => updateRtc('limited', `Network check incomplete: ${err.message}`))
-.finally(() => { rtcRunning = null; });
-return rtcRunning;
+  if (!applied.rtc) { updateRtc('off','Automatic checking is disabled.'); return; }
+  if (rtcRunning) return rtcRunning;
+  updateRtc('checking','Collecting public WebRTC candidates and checking CN/HK location…');
+  rtcRunning=(async()=>{
+    const ice=await iceCandidates();
+    if (!applied.rtc) return updateRtc('off','Automatic checking is disabled.');
+    const candidates=[...new Set(ice.candidates
+      .filter(c=>['srflx','prflx','host'].includes(c.type))
+      .map(c=>publicCandidateAddress(c.ip)).filter(Boolean))];
+    if (!candidates.length) return updateRtc('limited',
+      'No public ICE candidate found. Private and mDNS addresses ignored; geographic check incomplete.');
+    const sample=candidates.slice(0,8);
+    const checked=await Promise.all(sample.map(async ip=>({ip,...await locateCandidateCountry(ip)})));
+    if (!applied.rtc) return updateRtc('off','Automatic checking is disabled.');
+    const flagged=checked.filter(c=>c.classification==='risk');
+    const uncertain=checked.filter(c=>c.classification==='unknown');
+    if (flagged.length) return updateRtc('leak',
+      'CN/HK public WebRTC IP observed: '+flagged.map(x=>x.ip+' ('+x.countries.join('/')+')').join(', '));
+    if (uncertain.length || candidates.length>sample.length || ice.completed<ice.attempts)
+      return updateRtc('limited','Geographic check incomplete: '+uncertain.length+
+        ' unverified public IP(s), '+(ice.attempts-ice.completed)+' incomplete STUN route(s). No confirmed CN/HK candidate.');
+    updateRtc('safe','No CN/HK location detected among '+checked.length+
+      ' verified public WebRTC IP(s). This is not a guarantee against other leaks.');
+  })().catch(err=>updateRtc('limited','WebRTC location check incomplete: '+String(err?.message||err)))
+    .finally(()=>{rtcRunning=null;});
+  return rtcRunning;
 }
 const headerEchoUrls = ['https://httpbingo.org/headers','https://httpbin.org/headers'];
 let headerResult = null, headerRunning = null;
@@ -1178,8 +1212,8 @@ if (applied.fonts)
 result.push({kind:'unknown',text:'Font masking is partial; native rendering and all font probes are not verified.'});
 if (applied.rtc)
 result.push({kind:'unknown',text:rtcState.state==='limited'||rtcState.state==='unknown'
-? 'WebRTC collection incomplete; IPv6 and blocked routes not verified.'
-: 'WebRTC IPv6 and routes blocked by browser/network policy are not verified.'});
+? 'WebRTC collection incomplete; any uncollected or unverified routes remain unknown.'
+: 'WebRTC blocked routes and incomplete IPv6 geolocation are not verified.'});
 if (applied.ipConsistency || applied.rtc)
 result.push({kind:'unknown',text:'External IP lookups may use a different path than this website’s connection.'});
 result.push({kind:'unknown',text:'TLS/JA3/JA4 and high-entropy Client Hints are not verified by this userscript.'});
@@ -1444,8 +1478,8 @@ button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
 <div class="sub">Masks ${fontFamilies.length} common font names in supported APIs; text still renders normally.</div>
 </div>
 <div class="section">
-<div class="setting"><span class="label">Automatic WebRTC Leak Check</span><input id="rtcOn" type="checkbox" aria-label="Enable automatic WebRTC leak check"></div>
-<div class="sub">Cross-checks two STUN services and backup HTTP IP providers. Private IPs ignored; incomplete results are neutral.</div>
+<div class="setting"><span class="label">WebRTC CN/HK IP Check</span><input id="rtcOn" type="checkbox" aria-label="Enable WebRTC CN/HK IP check"></div>
+<div class="sub">Checks whether observed public WebRTC IPs geolocate to mainland China or Hong Kong. Private IPs ignored; incomplete results are neutral.</div>
 <div class="status" id="rtcStatus"></div>
 <button id="rtcRetry" class="tiny" type="button">Check again</button>
 </div>

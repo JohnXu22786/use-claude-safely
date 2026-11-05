@@ -42,10 +42,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
 // @grant        GM_addValueChangeListener
-// @connect      api.ipify.org
 // @connect      ipapi.co
-// @connect      ipv4.icanhazip.com
-// @connect      checkip.amazonaws.com
 // @connect      ipwho.is
 // @connect      ipinfo.io
 // @connect      raw.githubusercontent.com

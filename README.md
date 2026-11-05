@@ -88,3 +88,17 @@ font protection, and network checks. Selected mail sites inherit global
 environment values. Disabling a site causes its userscript to return before
 environment patching, external checks, or widget injection. Reload an already
 open mail page to apply a change; the UI asks before reloading.
+
+
+## WebRTC CN/HK geographic check
+
+When enabled, the userscript collects ICE candidates through independent STUN
+servers, ignores private/mDNS addresses, and checks observed **public** IPv4/IPv6
+addresses with multiple IP geolocation services. Two sources must classify a
+candidate in mainland China (CN) or Hong Kong (HK) to display a red alert.
+Disagreements, unavailable lookups, or incomplete ICE gathering are inconclusive,
+not proof of safety. This check is independent of the IP/timezone/region consistency
+check and does not compare WebRTC candidates to the HTTP exit IP.
+
+Candidate public IP addresses may be sent to the third-party geolocation providers
+for classification; disable automatic WebRTC checking if that is undesirable.

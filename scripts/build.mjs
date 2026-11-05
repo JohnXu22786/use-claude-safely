@@ -9,6 +9,7 @@ const source = [
   'src/features/timezone.js',
   'src/features/fonts.js',
   'src/core/settings.js',
+  'src/checks/webrtc-country.js',
   'src/features/webrtc.js',
   'src/features/network.js',
   'src/features/geolocation.js',

@@ -120,8 +120,8 @@ if (applied.fonts)
 result.push({kind:'unknown',text:'Font masking is partial; native rendering and all font probes are not verified.'});
 if (applied.rtc)
 result.push({kind:'unknown',text:rtcState.state==='limited'||rtcState.state==='unknown'
-? 'WebRTC collection incomplete; IPv6 and blocked routes not verified.'
-: 'WebRTC IPv6 and routes blocked by browser/network policy are not verified.'});
+? 'WebRTC collection incomplete; any uncollected or unverified routes remain unknown.'
+: 'WebRTC blocked routes and incomplete IPv6 geolocation are not verified.'});
 if (applied.ipConsistency || applied.rtc)
 result.push({kind:'unknown',text:'External IP lookups may use a different path than this website’s connection.'});
 result.push({kind:'unknown',text:'TLS/JA3/JA4 and high-entropy Client Hints are not verified by this userscript.'});
