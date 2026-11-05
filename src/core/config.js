@@ -23,6 +23,8 @@ localeEnabled: false,
 locale: originalLocale,
 fonts: true,
 rtc: true,
+mailEnabled: false,
+mailSites: normalizeMailSites(null),
 });
 const zoneAliases = {
 utc:'UTC', gmt:'UTC', z:'UTC', ut:'UTC',
@@ -150,10 +152,24 @@ localeEnabled: input.localeEnabled === true,
 locale: validLanguage(input.locale) || originalLocale,
 fonts: input.fonts !== false,
 rtc: input.rtc !== false,
+mailEnabled: input.mailEnabled === true,
+mailSites: normalizeMailSites(input.mailSites),
 };
 }
 let prefs = sanitize(GM_getValue(CONFIG_KEY, null));
+const mailService = detectMailProvider();
+if (mailService && !(prefs.mailEnabled && prefs.mailSites[mailService.id].enabled)) return;
 const applied = structuredCloneSafe(prefs);
+if (mailService) {
+  const flags = prefs.mailSites[mailService.id].features;
+  if (!flags.timezone) applied.timezone = SYSTEM;
+  if (!flags.language) {
+    applied.languageEnabled = false; applied.matchLanguageRegions = false;
+    applied.regionEnabled = false; applied.localeEnabled = false;
+  }
+  if (!flags.fonts) applied.fonts = false;
+  if (!flags.network) { applied.rtc = false; applied.ipConsistency = false; }
+}
 const zone = applied.timezone;
 function structuredCloneSafe(value) { return JSON.parse(JSON.stringify(value)); }
 function persist() { GM_setValue(CONFIG_KEY, structuredCloneSafe(prefs)); }
