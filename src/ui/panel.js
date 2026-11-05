@@ -56,6 +56,12 @@ white-space:normal;overflow-wrap:anywhere;}
 .chips {display:flex;flex-direction:column;gap:4px;margin:8px 0;max-height:130px;overflow:auto;}
 .chip {justify-content:space-between;border-radius:7px;background:#f1f4f8;padding:4px 6px;}
 .chip span {flex:1;overflow-wrap:anywhere;}
+.mail-service {padding:9px 0;border-bottom:1px solid #e6eaf0;}
+.mail-row {display:flex;align-items:center;gap:8px;}
+.mail-row .mail-expand {flex:1;text-align:left;border:0;background:transparent;}
+.mail-features {padding:8px 10px;margin:6px 0;border-radius:8px;background:#eff3f8;}
+.mail-features label {display:flex;gap:8px;align-items:center;padding:5px 0;}
+@media (prefers-color-scheme:dark) {.mail-features {background:#25374b;} .mail-service {border-color:#34465a;}}
 .summary {display:flex;gap:6px;align-items:center;margin:10px 0 2px;}
 .summary .status {margin:0;flex:1;min-width:0;font-size:11px;padding:8px;}
 .summary button {flex:none;padding:6px 10px;}
@@ -101,6 +107,7 @@ button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
 </style>
 <button id="fab" class="fab" type="button" aria-label="Environment Manager; drag to move">ENV ⚙</button>
 <section id="panel" class="panel" role="dialog" aria-label="Environment Manager" hidden>
+<div id="mainView">
 <div class="head"><strong>Environment Settings</strong><button id="close" class="tiny" type="button" aria-label="Close">✕</button></div>
 <div class="summary" id="consistencyTop">
 <div class="status" id="consistencyStatus" role="status" aria-live="polite"></div>
@@ -161,7 +168,16 @@ button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
 <div class="setting"><span class="label">IP / Timezone / Region Consistency</span><input id="ipConsistencyOn" type="checkbox" aria-label="Enable IP timezone region and language tag checks"></div>
 <div class="sub">Checks IP, timezone, selected region and non-zh -CN language tags (including HTTP if available). Other language regions are unrestricted.</div>
 </div>
+<div class="section"><button id="mailManage" type="button">Mail Websites · <span id="mailSummary">Off</span> ›</button></div>
 <div class="actionrow" style="margin-top:12px;justify-content:flex-end"><button id="reset" type="button">Reset to defaults</button></div>
+</div>
+<div id="mailView" hidden>
+<div class="head"><button id="mailBack" class="tiny" type="button">← Back</button><strong>Mail Websites</strong><button id="mailClose" class="tiny" type="button">✕</button></div>
+<div class="section"><div class="setting"><span class="label">Enable mail websites</span><input id="mailMaster" type="checkbox" aria-label="Enable selected mail websites"></div>
+<div class="sub">Off by default. Choose individual mail websites below. All sites inherit the global environment values; per-site switches control which modules run.</div></div>
+<div id="mailSiteList"></div>
+<div class="actionrow" style="margin-top:12px;justify-content:flex-end"><button id="mailSave" class="primary" type="button">Save mail settings</button></div>
+</div>
 </section>
 <div class="toast" id="message" role="status" aria-live="polite" hidden></div>
 `;
@@ -322,6 +338,7 @@ renderRtc();
 }
 consistencyListeners.add(renderConsistency);
 function syncControls() {
+$('mailSummary').textContent = prefs.mailEnabled ? mailProviders.filter(x => prefs.mailSites[x.id].enabled).length + ' selected' : 'Off';
 $('tzNow').textContent = `Saved: ${prefs.timezone === SYSTEM ? `System (${systemZone})` : prefs.timezone}`;
 $('languageOn').checked = prefs.languageEnabled;
 $('matchOn').checked = prefs.matchLanguageRegions;
@@ -504,7 +521,7 @@ runRtcCheck();
 $('reset').addEventListener('click', () => {
 if (!page.confirm('Restore default settings? Your floating button position will be kept.')) return;
 const next = {...defaultConfig, languages:[...originalLanguages], locale:originalLocale};
-const reloadKeys = ['timezone','languageEnabled','matchLanguageRegions','languages','regionEnabled','region','localeEnabled','locale','fonts'];
+const reloadKeys = ['timezone','languageEnabled','matchLanguageRegions','languages','regionEnabled','region','localeEnabled','locale','fonts','mailEnabled','mailSites'];
 const queued = { before:{}, keys:[] };
 for (const key of reloadKeys) {
 if (JSON.stringify(prefs[key]) !== JSON.stringify(next[key])) {
@@ -530,9 +547,62 @@ page.location.reload();
 message('Defaults saved. A manual reload may be needed to apply all changes.');
 }
 });
+let mailDraft = null;
+let expandedMailId = null;
+function renderMailSettings() {
+  $('mailMaster').checked = mailDraft.mailEnabled;
+  const container = document.createDocumentFragment();
+  for (const provider of mailProviders) {
+    const entry = mailDraft.mailSites[provider.id];
+    const item = document.createElement('div'); item.className = 'mail-service';
+    const row = document.createElement('div'); row.className = 'mail-row';
+    const check = document.createElement('input'); check.type = 'checkbox'; check.checked = entry.enabled;
+    check.setAttribute('aria-label','Enable ' + provider.name);
+    check.addEventListener('change',()=>{entry.enabled=check.checked;});
+    const expand = document.createElement('button'); expand.type = 'button'; expand.className = 'mail-expand';
+    expand.textContent = provider.name + (expandedMailId === provider.id ? ' ⌃' : ' ⌄');
+    expand.addEventListener('click',()=>{expandedMailId=expandedMailId===provider.id?null:provider.id;renderMailSettings();});
+    row.append(check,expand);item.appendChild(row);
+    if (expandedMailId === provider.id) {
+      const options = document.createElement('div'); options.className = 'mail-features';
+      for (const [key,label] of Object.entries(mailFeatureLabels)) {
+        const line=document.createElement('label');
+        const cb=document.createElement('input');cb.type='checkbox';cb.checked=entry.features[key];
+        cb.addEventListener('change',()=>{entry.features[key]=cb.checked;});
+        line.append(cb,document.createTextNode(label));options.appendChild(line);
+      }
+      item.appendChild(options);
+    }
+    container.appendChild(item);
+  }
+  $('mailSiteList').replaceChildren(container);layout();
+}
+$('mailManage').addEventListener('click', () => {
+  mailDraft = { mailEnabled:prefs.mailEnabled,mailSites:normalizeMailSites(prefs.mailSites) };
+  expandedMailId = null;
+  $('mainView').hidden = true;$('mailView').hidden = false;
+  panel.scrollTop=0;renderMailSettings();
+});
+$('mailMaster').addEventListener('change',e=>{mailDraft.mailEnabled=e.target.checked;});
+$('mailBack').addEventListener('click',()=>{
+  $('mailView').hidden=true;$('mainView').hidden=false;panel.scrollTop=0;layout();
+});
+$('mailClose').addEventListener('click',()=>{clearMessage();panel.hidden=true;});
+$('mailSave').addEventListener('click', () => {
+  prefs.mailEnabled=mailDraft.mailEnabled;
+  prefs.mailSites=normalizeMailSites(mailDraft.mailSites);
+  persist();
+  $('mailView').hidden=true;$('mainView').hidden=false;panel.scrollTop=0;
+  syncControls();layout();
+  if (mailService) {
+    if (page.confirm('Mail settings saved. Reload now to apply and verify them?')) page.location.reload();
+    else message('Saved. Reload manually to apply changes to this mail page.');
+  } else message('Mail settings saved. They will apply when selected mail sites load.');
+});
 showPanel = () => {
 languageDraft = [...prefs.languages];
 renderChips();
+$('mainView').hidden=false;$('mailView').hidden=true;
 panel.hidden = false;
 syncControls(); tzResults(); langResults(); regionResults(); localeResults(); layout();
 };
