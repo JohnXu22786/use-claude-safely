@@ -76,3 +76,15 @@ network dependencies. Make changes in `src/`, not only in the generated bundle.
 
 Run `npm run build`, `npm test`, then `node --check browser-environment-guard.user.js`.
 The GitHub Actions workflow checks that the committed generated file is current.
+
+
+## Mail website controls
+
+Select **Mail Websites** in the ENV settings panel to configure mail support.
+The master switch and all individual mail services are **off by default**.
+Enable the master switch and choose the specific services you want; expanding
+a service allows independent toggles for timezone, language/locale/region,
+font protection, and network checks. Selected mail sites inherit global
+environment values. Disabling a site causes its userscript to return before
+environment patching, external checks, or widget injection. Reload an already
+open mail page to apply a change; the UI asks before reloading.
