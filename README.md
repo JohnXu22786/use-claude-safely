@@ -65,3 +65,14 @@ The release tags are attached to their historical commits. Historical releases a
 | v0.1.0 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.1.0) |
 
 See [CHANGELOG.md](./CHANGELOG.md) for the milestone summaries.
+
+## Building from source
+
+Source is maintained in ordered fragments under `src/` (core, features, checks, UI and bootstrap).
+`npm run build` concatenates these fragments into the single self-contained
+`browser-environment-guard.user.js`. This intentionally preserves the original
+shared JavaScript scope and `document-start` behavior without runtime `@require`
+network dependencies. Make changes in `src/`, not only in the generated bundle.
+
+Run `npm run build`, `npm test`, then `node --check browser-environment-guard.user.js`.
+The GitHub Actions workflow checks that the committed generated file is current.
