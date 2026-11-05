@@ -4,7 +4,7 @@
 
 > **Scope:** This is a browser-side privacy and environment utility, not an account-safety guarantee, a complete device emulator, or a way to change a service's region eligibility. It cannot prevent sites from detecting all modifications.
 
-**[Install from main](https://raw.githubusercontent.com/JohnXu22786/use-claude-safely/main/browser-environment-guard.user.js)** · [Releases](https://github.com/JohnXu22786/use-claude-safely/releases) · [Changelog](./CHANGELOG.md) · [Issues](https://github.com/JohnXu22786/use-claude-safely/issues)
+**[Install from main](https://raw.githubusercontent.com/JohnXu22786/use-claude-safely/main/browser-environment-guard.user.js)** · [Releases](https://github.com/JohnXu22786/use-claude-safely/releases) · [Changelog](./CHANGELOG.md) · [Issues](https://github.com/JohnXu22786/use-claude-safely/issues) · [Roadmap](./ROADMAP.md) · [Branching](./BRANCHING.md)
 
 ## Features
 
@@ -96,6 +96,10 @@ node --check browser-environment-guard.user.js
 ```
 
 Edit the source under `src/`, then rebuild the generated `.user.js`. Pull requests are checked by GitHub Actions for test results, syntax validity, and generated-file reproducibility.
+
+## Planned v1 features
+
+Device fingerprint privacy controls—including device identity, Canvas, WebGL/GPU, audio, and network fingerprint protection—are planned for **v1.0**. See [ROADMAP.md](./ROADMAP.md) for the feature list. These features are not part of the current userscript.
 
 ## Contributions and releases
 
