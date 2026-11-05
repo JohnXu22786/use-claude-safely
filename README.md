@@ -1,104 +1,110 @@
 # Use Claude Safely
 
-A browser-side environment management userscript for Claude/Anthropic sites and selected webmail interfaces.
+**Browser Environment Guard** is an open-source Tampermonkey userscript for managing selected browser-visible environment settings and reviewing consistency or coverage limitations on Claude / Anthropic websites and supported webmail services.
 
-**Current version: v0.3.2**
+> **Scope:** This is a browser-side privacy and environment utility, not an account-safety guarantee, a complete device emulator, or a way to change a service's region eligibility. It cannot prevent sites from detecting all modifications.
 
-This is an environment utility, not an account-safety guarantee. It does not change your actual IP address, TLS fingerprint, server-side region checks, or a service's terms and eligibility requirements.
-
-## Installation
-
-1. Install a userscript manager such as Tampermonkey or Violentmonkey.
-2. Open the [v0.3.2 userscript](https://raw.githubusercontent.com/JohnXu22786/use-claude-safely/v0.3.2/browser-environment-guard.user.js) and approve the manager's installation prompt.
-3. Visit a supported website and open the draggable **ENV** control to configure preferences.
-4. Disable older copies of this script to prevent multiple instances from overriding one another.
+**[Install from main](https://raw.githubusercontent.com/JohnXu22786/use-claude-safely/main/browser-environment-guard.user.js)** · [Releases](https://github.com/JohnXu22786/use-claude-safely/releases) · [Changelog](./CHANGELOG.md) · [Issues](https://github.com/JohnXu22786/use-claude-safely/issues)
 
 ## Features
 
-- Search supported IANA timezones using aliases, UTC offsets, and city or country names.
-- Configure page-visible timezone, browser language preferences, `Intl` locale, and region where supported.
-- Optionally match common language tags with their usual regions.
-- Apply best-effort mitigation for some Chinese font-detection interfaces.
-- Check IP geolocation and WebRTC candidates through multiple providers.
-- Show focused consistency notices and separate additional signals and coverage notes.
-- Drag the **ENV** control and persist preferences through the userscript manager.
+| Area | Features |
+| --- | --- |
+| Timezone | Select browser-supported IANA zones; search by region, city, UTC/GMT offset, or common abbreviations. |
+| Browser language | Customize JavaScript-visible language preferences and optionally match common language tags to their usual regions. |
+| Intl locale and region | Select locale / region values for supported JavaScript formatting APIs. |
+| Chinese font protection | Best-effort suppression of certain detection techniques for common Chinese font names without removing installed fonts. |
+| WebRTC CN/HK check | Inspect observable **public** ICE candidate addresses for mainland China (\`CN\`) or Hong Kong (\`HK\`) geolocation. Private addresses and unavailable results are not treated as confirmed leaks. |
+| Consistency | Show short IP/timezone/region and unexpected non-Chinese \`-CN\` tag notices, plus separately expandable notes about other observable signals. |
+| Webmail controls | Opt-in master switch, per-provider switches and independent feature toggles in a separate Mail Websites panel. |
+| Interface | English UI, movable ENV control, persistent settings, searchable suggestions, and explicit reload prompts where needed. |
+
+## Install
+
+1. Install a compatible userscript manager such as **Tampermonkey**.
+2. Open the [single-file userscript on GitHub](https://raw.githubusercontent.com/JohnXu22786/use-claude-safely/main/browser-environment-guard.user.js) and approve its installation, or paste the source into a newly created userscript if automatic installation is unavailable.
+3. Disable any older installed copies to prevent duplicate patches.
+4. Visit a supported page and click the draggable **ENV** control. Settings are stored by the userscript manager.
+
+**GitHub is the project's distribution channel.** Installing the script does not require Greasy Fork or another userscript marketplace.
+
+The latest historical release is **v0.3.2**. The **main** branch may contain unreleased changes; the version metadata is not automatically advanced on every merged pull request.
 
 ## Supported websites
 
-The userscript runs on the following hosts, as defined by its `@match` metadata:
+**Claude / Anthropic:** \`claude.ai\`, \`claude.com\`, \`anthropic.com\`, and \`claudeusercontent.com\`, including matching subdomains.
 
-- Claude and Anthropic: `claude.ai`, `claude.com`, `anthropic.com`, and `claudeusercontent.com` (including their subdomains where matched).
-- Email: Gmail, Outlook, Yahoo Mail, iCloud Mail, Proton Mail, Tuta, Fastmail, Zoho Mail, AOL Mail, GMX, HEY, Yandex Mail, QQ Mail, NetEase Mail (`163.com`, `126.com`, `yeah.net`), Sina Mail, and Naver Mail.
+**Email:** Gmail, Outlook/Hotmail, Microsoft 365 Outlook, Yahoo Mail, iCloud Mail, Proton Mail, Tuta, Fastmail, Zoho Mail, AOL Mail, GMX Mail, HEY, Yandex Mail, QQ Mail, NetEase Mail (163 / 126 / yeah), Sina Mail, and Naver Mail.
 
-## Network requests
+The authoritative URL list is in the userscript's \`@match\` metadata. Third-party sign-in domains are not automatically covered unless explicitly matched.
 
-Optional checks may request timezone mapping data or contact third-party IP, geolocation, and header-echo providers. Those services may see the network address used for the request. Review the source and disable checks you do not need.
+### Mail Websites
 
-## Known limitations
+Email support is **disabled by default**. Under **ENV → Mail Websites**, enable the master switch, select providers, and optionally control timezone, language / locale / region, font protection, and network checking individually.
 
-- Userscripts cannot guarantee execution before every site script, worker, or frame.
-- JavaScript changes do not automatically change HTTP `Accept-Language`, TLS/JA3/JA4, native font rendering, or every WebRTC surface.
-- The header-echo check contacts another service; it does not read the exact headers received by Claude or a mail provider.
-- A missing mismatch does not prove anonymity, account safety, or compliance with a service's requirements.
-- Browser security policies and site changes may limit script injection or cross-origin requests.
+Each mail site inherits the global environment values; this is not a separate profile system. Disabled sites should exit before applying environment overrides or initiating their optional checks. Reload an already-open page after changing site enablement.
 
-## Releases and versioning
+## What the checks actually mean
 
-The project remains in the `0.x` series. Minor versions mark major feature milestones or significant functional expansion. Patch versions cover bug fixes, UI and search improvements, compatibility fixes, performance work, small additions, and documentation. Patch versions are preferred when a minor bump is not warranted.
+- **Applied / verified:** The selected script-accessible APIs returned expected values in the checked context. It is not a claim that the server received the same values.
+- **WebRTC CN/HK:** The check examines collected *public* ICE candidates. A red result requires multiple geolocation confirmations of a \`CN\` or \`HK\` address. An incomplete check or a lack of candidates is **not proof of no leaks**.
+- **IP / Region / Timezone:** Geographic comparisons are approximate; IP geolocation and timezones are not definitive indicators of physical location.
+- **Other signals:** JavaScript and HTTP \`Accept-Language\` can differ. Cross-origin echo tests cannot read the exact request headers that another website receives.
+- **Fonts:** Masking known font-detection methods does not guarantee invisibility to Canvas, DOM measurement, native rendering, or other fingerprinting methods.
 
-The release tags are attached to their historical commits. Historical releases are retrospective and do not imply that GitHub published them on those past dates.
+### Device fingerprint boundaries
 
-| Version | Release |
-| --- | --- |
-| v0.3.2 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.3.2) |
-| v0.3.1 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.3.1) |
-| v0.3.0 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.3.0) |
-| v0.2.6 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.6) |
-| v0.2.5 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.5) |
-| v0.2.4 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.4) |
-| v0.2.3 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.3) |
-| v0.2.2 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.2) |
-| v0.2.1 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.1) |
-| v0.2.0 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.2.0) |
-| v0.1.2 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.1.2) |
-| v0.1.1 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.1.1) |
-| v0.1.0 | [Release](https://github.com/JohnXu22786/use-claude-safely/releases/tag/v0.1.0) |
+The current userscript is **not a full device-fingerprint simulator**. Some JavaScript-facing fields can be changed, but:
 
-See [CHANGELOG.md](./CHANGELOG.md) for the milestone summaries.
+- UA Client Hints may also be sent in browser-generated HTTP \`Sec-CH-UA-*\` headers that userscript overrides do not control.
+- Canvas, WebGL and Web Audio behavior is tied to browser rendering and native implementation details; modifying a few JavaScript readout paths does not reproduce another device's complete rendering fingerprint.
+- TLS/JA3/JA4, HTTP/2 framing and genuine GPU hardware/driver behavior cannot be reliably overridden by a userscript.
+- Injection at \`document-start\` does not guarantee precedence over every website script, worker, iframe or browser-native interface.
 
-## Building from source
+Avoid interpreting any test result as a guarantee of anonymity, account eligibility or immunity from detection.
 
-Source is maintained in ordered fragments under `src/` (core, features, checks, UI and bootstrap).
-`npm run build` concatenates these fragments into the single self-contained
-`browser-environment-guard.user.js`. This intentionally preserves the original
-shared JavaScript scope and `document-start` behavior without runtime `@require`
-network dependencies. Make changes in `src/`, not only in the generated bundle.
+## Privacy and network access
 
-Run `npm run build`, `npm test`, then `node --check browser-environment-guard.user.js`.
-The GitHub Actions workflow checks that the committed generated file is current.
+Optional checks use external STUN, IP geolocation, header-echo or timezone-mapping providers, depending on the enabled features. Those third parties may receive your public IP or public WebRTC candidates. Disable unneeded network checks if this is undesirable.
 
+This project should not need access to email message contents, account passwords or authentication cookies to provide environment controls. Review the source and permissions before installing or updating.
 
-## Mail website controls
+## Build from source
 
-Select **Mail Websites** in the ENV settings panel to configure mail support.
-The master switch and all individual mail services are **off by default**.
-Enable the master switch and choose the specific services you want; expanding
-a service allows independent toggles for timezone, language/locale/region,
-font protection, and network checks. Selected mail sites inherit global
-environment values. Disabling a site causes its userscript to return before
-environment patching, external checks, or widget injection. Reload an already
-open mail page to apply a change; the UI asks before reloading.
+GitHub keeps **multiple source files** while users install **one self-contained script**:
 
+\`\`\`text
+src/
+  bootstrap.js
+  core/
+  features/
+  checks/
+  ui/
+scripts/build.mjs
+tests/
+browser-environment-guard.user.js    # generated install file
+\`\`\`
 
-## WebRTC CN/HK geographic check
+Source fragments are concatenated in a fixed order into the userscript's original shared JavaScript scope. There are no runtime \`@require\` dependencies. This preserves early initialization without waiting for external JavaScript modules.
 
-When enabled, the userscript collects ICE candidates through independent STUN
-servers, ignores private/mDNS addresses, and checks observed **public** IPv4/IPv6
-addresses with multiple IP geolocation services. Two sources must classify a
-candidate in mainland China (CN) or Hong Kong (HK) to display a red alert.
-Disagreements, unavailable lookups, or incomplete ICE gathering are inconclusive,
-not proof of safety. This check is independent of the IP/timezone/region consistency
-check and does not compare WebRTC candidates to the HTTP exit IP.
+Requires Node.js 22 or later:
 
-Candidate public IP addresses may be sent to the third-party geolocation providers
-for classification; disable automatic WebRTC checking if that is undesirable.
+\`\`\`bash
+npm run build
+npm test
+node --check browser-environment-guard.user.js
+\`\`\`
+
+Edit the source under \`src/\`, then rebuild the generated \`.user.js\`. Pull requests are checked by GitHub Actions for test results, syntax validity, and generated-file reproducibility.
+
+## Contributions and releases
+
+Bug reports and focused pull requests are welcome. Include your browser and operating system, reproduction steps, what you expected, and what actually happened; do **not** include email content, login data, or unredacted public IPs.
+
+The project is in the \`0.x\` development series. Minor versions indicate larger capability milestones; patch versions cover UI, fixes, compatibility, search and small improvements. Not every PR is a new release.
+
+See [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/JohnXu22786/use-claude-safely/releases). Git tags represent historical snapshots and must not be rewritten.
+
+## License
+
+See [LICENSE](./LICENSE).
