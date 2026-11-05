@@ -14,8 +14,8 @@
 | Browser language | Customize JavaScript-visible language preferences and optionally match common language tags to their usual regions. |
 | Intl locale and region | Select locale / region values for supported JavaScript formatting APIs. |
 | Chinese font protection | Best-effort suppression of certain detection techniques for common Chinese font names without removing installed fonts. |
-| WebRTC CN/HK check | Inspect observable **public** ICE candidate addresses for mainland China (\`CN\`) or Hong Kong (\`HK\`) geolocation. Private addresses and unavailable results are not treated as confirmed leaks. |
-| Consistency | Show short IP/timezone/region and unexpected non-Chinese \`-CN\` tag notices, plus separately expandable notes about other observable signals. |
+| WebRTC CN/HK check | Inspect observable **public** ICE candidate addresses for mainland China (`CN`) or Hong Kong (`HK`) geolocation. Private addresses and unavailable results are not treated as confirmed leaks. |
+| Consistency | Show short IP/timezone/region and unexpected non-Chinese `-CN` tag notices, plus separately expandable notes about other observable signals. |
 | Webmail controls | Opt-in master switch, per-provider switches and independent feature toggles in a separate Mail Websites panel. |
 | Interface | English UI, movable ENV control, persistent settings, searchable suggestions, and explicit reload prompts where needed. |
 
@@ -32,11 +32,11 @@ The latest historical release is **v0.3.2**. The **main** branch may contain unr
 
 ## Supported websites
 
-**Claude / Anthropic:** \`claude.ai\`, \`claude.com\`, \`anthropic.com\`, and \`claudeusercontent.com\`, including matching subdomains.
+**Claude / Anthropic:** `claude.ai`, `claude.com`, `anthropic.com`, and `claudeusercontent.com`, including matching subdomains.
 
 **Email:** Gmail, Outlook/Hotmail, Microsoft 365 Outlook, Yahoo Mail, iCloud Mail, Proton Mail, Tuta, Fastmail, Zoho Mail, AOL Mail, GMX Mail, HEY, Yandex Mail, QQ Mail, NetEase Mail (163 / 126 / yeah), Sina Mail, and Naver Mail.
 
-The authoritative URL list is in the userscript's \`@match\` metadata. Third-party sign-in domains are not automatically covered unless explicitly matched.
+The authoritative URL list is in the userscript's `@match` metadata. Third-party sign-in domains are not automatically covered unless explicitly matched.
 
 ### Mail Websites
 
@@ -47,19 +47,19 @@ Each mail site inherits the global environment values; this is not a separate pr
 ## What the checks actually mean
 
 - **Applied / verified:** The selected script-accessible APIs returned expected values in the checked context. It is not a claim that the server received the same values.
-- **WebRTC CN/HK:** The check examines collected *public* ICE candidates. A red result requires multiple geolocation confirmations of a \`CN\` or \`HK\` address. An incomplete check or a lack of candidates is **not proof of no leaks**.
+- **WebRTC CN/HK:** The check examines collected *public* ICE candidates. A red result requires multiple geolocation confirmations of a `CN` or `HK` address. An incomplete check or a lack of candidates is **not proof of no leaks**.
 - **IP / Region / Timezone:** Geographic comparisons are approximate; IP geolocation and timezones are not definitive indicators of physical location.
-- **Other signals:** JavaScript and HTTP \`Accept-Language\` can differ. Cross-origin echo tests cannot read the exact request headers that another website receives.
+- **Other signals:** JavaScript and HTTP `Accept-Language` can differ. Cross-origin echo tests cannot read the exact request headers that another website receives.
 - **Fonts:** Masking known font-detection methods does not guarantee invisibility to Canvas, DOM measurement, native rendering, or other fingerprinting methods.
 
 ### Device fingerprint boundaries
 
 The current userscript is **not a full device-fingerprint simulator**. Some JavaScript-facing fields can be changed, but:
 
-- UA Client Hints may also be sent in browser-generated HTTP \`Sec-CH-UA-*\` headers that userscript overrides do not control.
+- UA Client Hints may also be sent in browser-generated HTTP `Sec-CH-UA-*` headers that userscript overrides do not control.
 - Canvas, WebGL and Web Audio behavior is tied to browser rendering and native implementation details; modifying a few JavaScript readout paths does not reproduce another device's complete rendering fingerprint.
 - TLS/JA3/JA4, HTTP/2 framing and genuine GPU hardware/driver behavior cannot be reliably overridden by a userscript.
-- Injection at \`document-start\` does not guarantee precedence over every website script, worker, iframe or browser-native interface.
+- Injection at `document-start` does not guarantee precedence over every website script, worker, iframe or browser-native interface.
 
 Avoid interpreting any test result as a guarantee of anonymity, account eligibility or immunity from detection.
 
@@ -73,7 +73,7 @@ This project should not need access to email message contents, account passwords
 
 GitHub keeps **multiple source files** while users install **one self-contained script**:
 
-\`\`\`text
+```text
 src/
   bootstrap.js
   core/
@@ -83,25 +83,25 @@ src/
 scripts/build.mjs
 tests/
 browser-environment-guard.user.js    # generated install file
-\`\`\`
+```
 
-Source fragments are concatenated in a fixed order into the userscript's original shared JavaScript scope. There are no runtime \`@require\` dependencies. This preserves early initialization without waiting for external JavaScript modules.
+Source fragments are concatenated in a fixed order into the userscript's original shared JavaScript scope. There are no runtime `@require` dependencies. This preserves early initialization without waiting for external JavaScript modules.
 
 Requires Node.js 22 or later:
 
-\`\`\`bash
+```bash
 npm run build
 npm test
 node --check browser-environment-guard.user.js
-\`\`\`
+```
 
-Edit the source under \`src/\`, then rebuild the generated \`.user.js\`. Pull requests are checked by GitHub Actions for test results, syntax validity, and generated-file reproducibility.
+Edit the source under `src/`, then rebuild the generated `.user.js`. Pull requests are checked by GitHub Actions for test results, syntax validity, and generated-file reproducibility.
 
 ## Contributions and releases
 
 Bug reports and focused pull requests are welcome. Include your browser and operating system, reproduction steps, what you expected, and what actually happened; do **not** include email content, login data, or unredacted public IPs.
 
-The project is in the \`0.x\` development series. Minor versions indicate larger capability milestones; patch versions cover UI, fixes, compatibility, search and small improvements. Not every PR is a new release.
+The project is in the `0.x` development series. Minor versions indicate larger capability milestones; patch versions cover UI, fixes, compatibility, search and small improvements. Not every PR is a new release.
 
 See [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/JohnXu22786/use-claude-safely/releases). Git tags represent historical snapshots and must not be rewritten.
 
