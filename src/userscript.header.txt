@@ -1,0 +1,53 @@
+// ==UserScript==
+// @name         Claude / Anthropic - Environment Manager
+// @version      0.3.2
+// @namespace    https://userscripts.local/claude-anthropic-timezone
+// @description  Claude and webmail environment controls with concise consistency checks and independent coverage notes.
+// @match        https://claude.ai/*
+// @match        https://*.claude.ai/*
+// @match        https://claude.com/*
+// @match        https://*.claude.com/*
+// @match        https://anthropic.com/*
+// @match        https://*.anthropic.com/*
+// @match        https://claudeusercontent.com/*
+// @match        https://*.claudeusercontent.com/*
+// @match        https://mail.google.com/*
+// @match        https://outlook.live.com/*
+// @match        https://outlook.office.com/*
+// @match        https://outlook.office365.com/*
+// @match        https://outlook.cloud.microsoft/*
+// @match        https://mail.yahoo.com/*
+// @match        https://www.icloud.com/mail*
+// @match        https://mail.proton.me/*
+// @match        https://app.tuta.com/*
+// @match        https://app.fastmail.com/*
+// @match        https://mail.zoho.com/*
+// @match        https://mail.aol.com/*
+// @match        https://mail.gmx.com/*
+// @match        https://www.gmx.net/*
+// @match        https://app.hey.com/*
+// @match        https://mail.yandex.com/*
+// @match        https://mail.yandex.ru/*
+// @match        https://mail.qq.com/*
+// @match        https://mail.163.com/*
+// @match        https://mail.126.com/*
+// @match        https://mail.yeah.net/*
+// @match        https://mail.sina.com.cn/*
+// @match        https://mail.naver.com/*
+// @run-at       document-start
+// @sandbox      raw
+// @grant        unsafeWindow
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
+// @grant        GM_addValueChangeListener
+// @connect      api.ipify.org
+// @connect      ipapi.co
+// @connect      ipv4.icanhazip.com
+// @connect      checkip.amazonaws.com
+// @connect      ipwho.is
+// @connect      ipinfo.io
+// @connect      raw.githubusercontent.com
+// @connect      cdn.jsdelivr.net
+// ==/UserScript==
