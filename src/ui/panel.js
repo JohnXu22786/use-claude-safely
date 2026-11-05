@@ -159,8 +159,8 @@ button {background:#283a4d;color:#f1f5fa;border-color:#53677f;}
 <div class="sub">Masks ${fontFamilies.length} common font names in supported APIs; text still renders normally.</div>
 </div>
 <div class="section">
-<div class="setting"><span class="label">Automatic WebRTC Leak Check</span><input id="rtcOn" type="checkbox" aria-label="Enable automatic WebRTC leak check"></div>
-<div class="sub">Cross-checks two STUN services and backup HTTP IP providers. Private IPs ignored; incomplete results are neutral.</div>
+<div class="setting"><span class="label">WebRTC CN/HK IP Check</span><input id="rtcOn" type="checkbox" aria-label="Enable WebRTC CN/HK IP check"></div>
+<div class="sub">Checks whether observed public WebRTC IPs geolocate to mainland China or Hong Kong. Private IPs ignored; incomplete results are neutral.</div>
 <div class="status" id="rtcStatus"></div>
 <button id="rtcRetry" class="tiny" type="button">Check again</button>
 </div>
