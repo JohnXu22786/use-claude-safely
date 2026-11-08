@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Claude / Anthropic - Environment Manager
-// @version      0.3.2
+// @version      0.3.3
 // @namespace    https://userscripts.local/claude-anthropic-timezone
 // @description  Claude and webmail environment controls with concise consistency checks and independent coverage notes.
 // @match        https://claude.ai/*

@@ -28,7 +28,7 @@
 
 **GitHub is the project's distribution channel.** Installing the script does not require Greasy Fork or another userscript marketplace.
 
-The latest historical release is **v0.3.2**. The **main** branch may contain unreleased changes; the version metadata is not automatically advanced on every merged pull request.
+The latest release is **v0.3.3**. The **main** branch may contain unreleased changes; the version metadata is not automatically advanced on every merged pull request.
 
 ## Supported websites
 

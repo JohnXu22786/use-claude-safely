@@ -2,6 +2,11 @@
 
 These retrospective milestones map to existing commits and merged pull requests. GitHub publication dates are the actual release publication dates, not historical development dates.
 
+## v0.3.3
+
+- Added configurable webmail controls, improved CN/HK WebRTC country checks, introduced modular source builds, and updated the interface theme and project documentation.
+- Historical basis: merged PRs #15–20; includes all changes since v0.3.2.
+
 ## v0.3.2
 
 - Documented installation, supported scope, and limitations; added current userscript version metadata.
