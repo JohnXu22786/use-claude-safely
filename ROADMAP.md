@@ -17,7 +17,7 @@ This document describes **planned features**, not release dates or implementatio
 - **Canvas fingerprint protection:** Provide configurable protection for Canvas-based device fingerprinting.
 - **WebGL and GPU fingerprint protection:** Provide controls for graphics-related fingerprint information.
 - **Audio fingerprint protection:** Provide controls for audio-based device fingerprinting.
-- **Network fingerprint privacy:** Add protection and visibility for network fingerprint signals, including TLS and HTTP/2.
+- **Network fingerprint visibility:** Assess observable network signals and document TLS and HTTP/2 limitations; extension control is not assumed.
 - **Unified fingerprint controls:** Manage individual fingerprint protection features from one settings panel.
 - **Protection status and consistency:** Show concise, understandable alerts for observable inconsistencies and incomplete protection.
 - **Saved preferences and recovery:** Remember selected options and make it easy to restore original behavior.
@@ -30,3 +30,7 @@ This document describes **planned features**, not release dates or implementatio
 - Final scope may change based on testing and user feedback.
 
 See [BRANCHING.md](./BRANCHING.md) for the contribution and release workflow.
+
+## v1 extension planning
+
+The proposed migration from the userscript to a Chromium MV3 extension, research evidence, ordered backlog, coverage review and explicit capability limits are tracked in [the v1 extension plan](docs/v1-extension-plan.md). This is a planning document; implementation and release scope remain subject to review.
